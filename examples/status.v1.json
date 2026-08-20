@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "ts": "2026-08-20T19:45:00+02:00",
+  "cli_version": "0.1.0",
+  "running": 2,
+  "starting": 0,
+  "error": 1,
+  "stopped": 4,
+  "total": 7,
+  "groups": {
+    "backend": {
+      "running": 1,
+      "starting": 0,
+      "error": 0,
+      "stopped": 1,
+      "total": 2
+    },
+    "fe": {
+      "running": 1,
+      "starting": 0,
+      "error": 1,
+      "stopped": 1,
+      "total": 3
+    },
+    "iot": {
+      "running": 0,
+      "starting": 0,
+      "error": 0,
+      "stopped": 2,
+      "total": 2
+    }
+  },
+  "connections": [
+    {
+      "id": "backend-dev",
+      "name": "Backend Dev",
+      "group": "backend",
+      "instance": "toolsense-dev:europe-west1:backend-postgres-1",
+      "address": "127.0.0.1",
+      "port": 15432,
+      "private_ip": false,
+      "state": "running",
+      "source": "unit",
+      "pid": 12001,
+      "unit": "cloud-sql-proxy-backend-dev.service",
+      "port_open": true,
+      "uptime_sec": 7200,
+      "error": null
+    },
+    {
+      "id": "backend-prod",
+      "name": "Backend Prod",
+      "group": "backend",
+      "instance": "toolsense:europe-west1:toolsense-3",
+      "address": "127.0.0.1",
+      "port": 15433,
+      "private_ip": false,
+      "state": "stopped",
+      "source": "none",
+      "pid": null,
+      "unit": "cloud-sql-proxy-backend-prod.service",
+      "port_open": false,
+      "uptime_sec": null,
+      "error": null
+    },
+    {
+      "id": "fe-dev",
+      "name": "FE Dev",
+      "group": "fe",
+      "instance": "toolsense-dev:europe-west1:toolsense-2",
+      "address": "127.0.0.1",
+      "port": 15434,
+      "private_ip": false,
+      "state": "running",
+      "source": "orphan",
+      "pid": 12002,
+      "unit": "cloud-sql-proxy-fe-dev.service",
+      "port_open": true,
+      "uptime_sec": 300,
+      "error": null
+    },
+    {
+      "id": "fe-prod",
+      "name": "FE Prod",
+      "group": "fe",
+      "instance": "toolsense:europe-west1:toolsense-2-replica-2",
+      "address": "127.0.0.1",
+      "port": 15435,
+      "private_ip": false,
+      "state": "error",
+      "source": "none",
+      "pid": null,
+      "unit": "cloud-sql-proxy-fe-prod.service",
+      "port_open": false,
+      "uptime_sec": null,
+      "error": {
+        "code": "port_in_use",
+        "detail": "127.0.0.1:15435 is held by pid 9999 (not cloud-sql-proxy for this instance)"
+      }
+    },
+    {
+      "id": "fe-rw-prod",
+      "name": "FE RW Prod",
+      "group": "fe",
+      "instance": "toolsense:europe-west1:toolsense-2",
+      "address": "127.0.0.1",
+      "port": 15436,
+      "private_ip": false,
+      "state": "stopped",
+      "source": "none",
+      "pid": null,
+      "unit": "cloud-sql-proxy-fe-rw-prod.service",
+      "port_open": false,
+      "uptime_sec": null,
+      "error": null
+    },
+    {
+      "id": "iot-dev",
+      "name": "IoT Dev",
+      "group": "iot",
+      "instance": "toolsense-iot-dev:europe-west1:postgres-development",
+      "address": "127.0.0.1",
+      "port": 15437,
+      "private_ip": false,
+      "state": "stopped",
+      "source": "none",
+      "pid": null,
+      "unit": "cloud-sql-proxy-iot-dev.service",
+      "port_open": false,
+      "uptime_sec": null,
+      "error": null
+    },
+    {
+      "id": "iot-prod",
+      "name": "IoT Prod",
+      "group": "iot",
+      "instance": "toolsense-iot:europe-west1:postgres-production",
+      "address": "127.0.0.1",
+      "port": 15438,
+      "private_ip": false,
+      "state": "stopped",
+      "source": "none",
+      "pid": null,
+      "unit": "cloud-sql-proxy-iot-prod.service",
+      "port_open": false,
+      "uptime_sec": null,
+      "error": null
+    }
+  ]
+}

@@ -101,10 +101,19 @@ Do **not** lose this thread (not in v1 destination):
 - Tracked: [Deferred research: multi-proxy `--health-check` strategy](https://github.com/golgor/cloud-sql-tracker/issues/15) and map **Out of scope / stretch**.
 - Until then: never enable default 9090/9091 health/admin ports on every instance.
 
+## Status document (frozen v1)
+
+Machine contract for `status --json`:
+
+- Prose (field meanings): [`docs/status-document.v1.md`](./status-document.v1.md)
+- JSON Schema: [`schemas/status.v1.json`](../schemas/status.v1.json)
+- Golden example: [`examples/status.v1.json`](../examples/status.v1.json)
+
+Plugin and tests bind to schema `version: 1`. See that doc for `list` vs `status` vs future `config`.
+
 ## CLI surface (planned)
 
 ```
-cloud-sql-tracker list [--json]
 cloud-sql-tracker status [id|--group G|--all] [--json]
 cloud-sql-tracker start <id|--group G|--all> [--wait-ms N]
 cloud-sql-tracker stop  <id|--group G|--all> [--wait-ms N]
@@ -114,7 +123,9 @@ cloud-sql-tracker doctor [--json]
 cloud-sql-tracker --version
 ```
 
-Later: `config init|list|add|set|remove`.
+`list` is **not** a second Status schema; exact fate of any `list` command is left to the argv ticket (likely drop, human-only, or later fold into `config`).
+
+Later (stretch / later map): `config init|list|add|set|remove` for CLI-mediated config editing.
 
 ### Exit codes (planned)
 
@@ -139,7 +150,7 @@ Later: `config init|list|add|set|remove`.
 
 ## Build slices
 
-1. Config load + validate + `list` / `status --json` (stopped-only if nothing running)
+1. Config load + validate + `status --json` (stopped-only if nothing running)
 2. `start` / `stop` via systemd --user + port/pid reconcile
 3. Orphan adopt + `doctor` + `logs`
 4. Group targeting polish + wait/starting timeouts → `error`

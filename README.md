@@ -17,6 +17,8 @@ cloud-sql-tracker stop --group backend
 | | |
 |--|--|
 | Design | [docs/DESIGN.md](docs/DESIGN.md) |
+| Status document v1 | [docs/status-document.v1.md](docs/status-document.v1.md) · [schema](schemas/status.v1.json) · [example](examples/status.v1.json) |
+| Agent guide | [AGENTS.md](AGENTS.md) |
 | ADRs | [docs/adr/](docs/adr/) |
 | Research (tradeoffs) | [docs/RESEARCH.md](docs/RESEARCH.md) |
 | Research (systemd/ports/logs) | [docs/research/](docs/research/) |

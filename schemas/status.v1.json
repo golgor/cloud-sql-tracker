@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/golgor/cloud-sql-tracker/schemas/status.v1.json",
+  "title": "cloud-sql-tracker Status document v1",
+  "description": "Output of `cloud-sql-tracker status --json`. Prose: docs/status-document.v1.md",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "version",
+    "ts",
+    "cli_version",
+    "running",
+    "starting",
+    "error",
+    "stopped",
+    "total",
+    "groups",
+    "connections"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Status document schema id. Breaking shape changes bump this integer."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp when the snapshot was built."
+    },
+    "cli_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semver of the cloud-sql-tracker binary that produced this document."
+    },
+    "running": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of connections with state == running."
+    },
+    "starting": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of connections with state == starting."
+    },
+    "error": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of connections with state == error."
+    },
+    "stopped": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of connections with state == stopped."
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Length of connections array."
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/groupCounts" },
+      "description": "Per-group counters keyed by group name from config."
+    },
+    "connections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/connection" }
+    }
+  },
+  "$defs": {
+    "groupCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["running", "starting", "error", "stopped", "total"],
+      "properties": {
+        "running": { "type": "integer", "minimum": 0 },
+        "starting": { "type": "integer", "minimum": 0 },
+        "error": { "type": "integer", "minimum": 0 },
+        "stopped": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "connectionError": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable machine token. Known v1 values include bin_missing, port_in_use, exec_failed, unit_failed, start_timeout, auth, config, unknown. Consumers must tolerate unknown codes."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Human-readable explanation; wording may change without a schema bump."
+        }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "name",
+        "group",
+        "instance",
+        "address",
+        "port",
+        "private_ip",
+        "state",
+        "source",
+        "pid",
+        "unit",
+        "port_open",
+        "uptime_sec",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable Connection id from config."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display label."
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Group key for bulk actions and UI grouping."
+        },
+        "instance": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cloud SQL instance connection name (project:region:instance)."
+        },
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Local listen address (typically 127.0.0.1)."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Local listen port."
+        },
+        "private_ip": {
+          "type": "boolean",
+          "description": "Whether the proxy is configured for private IP."
+        },
+        "state": {
+          "type": "string",
+          "enum": ["stopped", "starting", "running", "error"],
+          "description": "Health state after reconcile. running means unit-or-orphan active AND local TCP accept."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["unit", "orphan", "none"],
+          "description": "unit = managed systemd user unit; orphan = matching proxy not under our unit; none = no process."
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Proxy MainPID if known."
+        },
+        "unit": {
+          "type": ["string", "null"],
+          "description": "Expected unit name cloud-sql-proxy-<id>.service."
+        },
+        "port_open": {
+          "type": "boolean",
+          "description": "TCP connect_timeout probe to address:port succeeded."
+        },
+        "uptime_sec": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Process uptime in seconds if known."
+        },
+        "error": {
+          "description": "null when not in error; object when state is error.",
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/connectionError" }
+          ]
+        }
+      }
+    }
+  }
+}
