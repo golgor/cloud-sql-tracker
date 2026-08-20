@@ -33,28 +33,24 @@ The CLI is **stateless and short-lived**: each invocation does one job and exits
 - Plugin id: `io.github.golgor.cloud-sql-tracker`
 - Contract: `status --json` schema `version` field + `cloud-sql-tracker --version` minimum check.
 
-## Config
+## Config (frozen v1)
 
-- Path: `~/.config/cloud-sql-tracker/connections.json`
-- v1: hand-edited (seed from `examples/connections.json`)
-- Later: `cloud-sql-tracker config ...` CRUD so all writers go through the CLI
+Full validation, merge, and reserved-port rules:
 
-### Connection fields (v1)
+- Prose: [`docs/config.v1.md`](./config.v1.md)
+- JSON Schema: [`schemas/config.v1.json`](../schemas/config.v1.json)
+- Golden: [`examples/connections.json`](../examples/connections.json)
 
-| Field | Required | Notes |
-|-------|----------|--------|
-| `id` | yes | stable key, unit name suffix |
-| `name` | yes | display label |
-| `group` | yes | e.g. `backend`, `fe`, `iot` |
-| `instance` | yes | `project:region:instance` |
-| `port` | yes | fixed local port; **never** default 5432 |
-| `address` | no | default `127.0.0.1` |
-| `private_ip` | no | default `false` |
-| `auto_iam_authn` | no | default `false` |
-| `extra_args` | no | passthrough to proxy |
-| `enabled` | no | default `true` |
+Highlights:
 
-Global `defaults` merge under each connection.
+- Path: `$XDG_CONFIG_HOME/cloud-sql-tracker/connections.json` or `~/.config/...`; override `--config`
+- Strict JSON (no JSONC); **unknown keys rejected** (exit 2)
+- `defaults` merge: built-ins → file `defaults` → per-connection
+- Unique **`id`**, **`port`**, and **`instance`** after merge
+- Ports: 1024–65535 excluding **5432**, **3306**, **1433**; no privileged 1–1023
+- `enabled: false`: still listed in status; single-id start refused; skipped on multi-target start
+- `proxy_bin` resolved at start/doctor, not at parse time
+- Later: `cloud-sql-tracker config ...` CRUD
 
 ## Ports (initial Toolsense map)
 
