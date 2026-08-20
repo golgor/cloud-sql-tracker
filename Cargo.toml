@@ -1,0 +1,19 @@
+[package]
+name = "cloud-sql-tracker"
+version = "0.1.0"
+edition = "2021"
+description = "Control plane for multiple Google Cloud SQL Auth Proxy processes"
+license = "MIT"
+repository = "https://github.com/golgor/cloud-sql-tracker"
+readme = "README.md"
+keywords = ["cloud-sql", "proxy", "gcp", "omarchy"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Intentionally minimal until implementation slices land.
+# Likely: clap, serde, serde_json, thiserror, directories (or similar).
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

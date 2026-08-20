@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "proxy_bin": "cloud-sql-proxy",
+  "defaults": {
+    "address": "127.0.0.1",
+    "private_ip": false,
+    "auto_iam_authn": false,
+    "extra_args": []
+  },
+  "connections": [
+    {
+      "id": "backend-dev",
+      "name": "Backend Dev",
+      "group": "backend",
+      "instance": "toolsense-dev:europe-west1:backend-postgres-1",
+      "port": 15432
+    },
+    {
+      "id": "backend-prod",
+      "name": "Backend Prod",
+      "group": "backend",
+      "instance": "toolsense:europe-west1:toolsense-3",
+      "port": 15433
+    },
+    {
+      "id": "fe-dev",
+      "name": "FE Dev",
+      "group": "fe",
+      "instance": "toolsense-dev:europe-west1:toolsense-2",
+      "port": 15434
+    },
+    {
+      "id": "fe-prod",
+      "name": "FE Prod",
+      "group": "fe",
+      "instance": "toolsense:europe-west1:toolsense-2-replica-2",
+      "port": 15435
+    },
+    {
+      "id": "fe-rw-prod",
+      "name": "FE RW Prod",
+      "group": "fe",
+      "instance": "toolsense:europe-west1:toolsense-2",
+      "port": 15436
+    },
+    {
+      "id": "iot-dev",
+      "name": "IoT Dev",
+      "group": "iot",
+      "instance": "toolsense-iot-dev:europe-west1:postgres-development",
+      "port": 15437
+    },
+    {
+      "id": "iot-prod",
+      "name": "IoT Prod",
+      "group": "iot",
+      "instance": "toolsense-iot:europe-west1:postgres-production",
+      "port": 15438
+    }
+  ]
+}
