@@ -111,31 +111,24 @@ Machine contract for `status --json`:
 
 Plugin and tests bind to schema `version: 1`. See that doc for `list` vs `status` vs future `config`.
 
-## CLI surface (planned)
+## CLI surface (frozen v1)
+
+Full argv, version, and exit-code contract: [`docs/cli-contract.v1.md`](./cli-contract.v1.md).
 
 ```
-cloud-sql-tracker status [id|--group G|--all] [--json]
-cloud-sql-tracker start <id|--group G|--all> [--wait-ms N]
-cloud-sql-tracker stop  <id|--group G|--all> [--wait-ms N]
-cloud-sql-tracker restart <id|--group G|--all>
-cloud-sql-tracker logs <id> [--lines N]
-cloud-sql-tracker doctor [--json]
-cloud-sql-tracker --version
+cloud-sql-tracker [--config PATH] status [--json] [id | --group G | --all]
+cloud-sql-tracker start    [--wait-ms N] <id | --group G | --all>
+cloud-sql-tracker stop     [--wait-ms N] <id | --group G | --all>
+cloud-sql-tracker restart  [--wait-ms N] [--failed] <id | --group G | --all>
+cloud-sql-tracker logs     <id> [--lines N]
+cloud-sql-tracker doctor   [--json]
+cloud-sql-tracker --version   # bare semver from Cargo.toml only
 ```
 
-`list` is **not** a second Status schema; exact fate of any `list` command is left to the argv ticket (likely drop, human-only, or later fold into `config`).
-
-Later (stretch / later map): `config init|list|add|set|remove` for CLI-mediated config editing.
-
-### Exit codes (planned)
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success (status/list succeed even if some connections are in error) |
-| 1 | Partial failure on multi-target start/stop |
-| 2 | Usage / bad config / unknown id |
-| 3 | Dependency failure (no user systemd, missing proxy binary, …) |
-| 4 | All requested operations failed |
+- **No `list` in v1** — runtime view is `status`; config inventory is later `config list`.
+- **No rollback** on partial multi-target failure (exit `1`); successes stay applied.
+- **`restart --failed`** — only cycle connections currently in Health state `error`.
+- Later (stretch): `config init|list|add|set|remove`.
 
 ## Non-goals (v1)
 
