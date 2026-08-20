@@ -12,12 +12,13 @@ cloud-sql-tracker stop --group backend
 
 ## Status
 
-**Scaffold / design locked.** Implementation not started.
+**Contracts locking via PRs.** Binary still a stub (`0.1.0` in `Cargo.toml` only — single version source).
 
 | | |
 |--|--|
 | Design | [docs/DESIGN.md](docs/DESIGN.md) |
 | Status document v1 | [docs/status-document.v1.md](docs/status-document.v1.md) · [schema](schemas/status.v1.json) · [example](examples/status.v1.json) |
+| CLI contract v1 | [docs/cli-contract.v1.md](docs/cli-contract.v1.md) |
 | Agent guide | [AGENTS.md](AGENTS.md) |
 | ADRs | [docs/adr/](docs/adr/) |
 | Research (tradeoffs) | [docs/RESEARCH.md](docs/RESEARCH.md) |
@@ -58,19 +59,21 @@ cp examples/connections.json ~/.config/cloud-sql-tracker/connections.json
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the schema and the initial port map.
 
-## Planned commands
+## Commands (v1 contract)
+
+See [docs/cli-contract.v1.md](docs/cli-contract.v1.md).
 
 ```
-cloud-sql-tracker list [--json]
-cloud-sql-tracker status [id|--group G|--all] [--json]
-cloud-sql-tracker start <id|--group G|--all>
-cloud-sql-tracker stop  <id|--group G|--all>
-cloud-sql-tracker restart <id|--group G|--all>
+cloud-sql-tracker --version          # bare semver from Cargo.toml
+cloud-sql-tracker status --json
+cloud-sql-tracker start  <id|--group G|--all>
+cloud-sql-tracker stop   <id|--group G|--all>
+cloud-sql-tracker restart [--failed] <id|--group G|--all>
 cloud-sql-tracker logs <id>
 cloud-sql-tracker doctor [--json]
 ```
 
-Later: `config` subcommands so UIs never need filesystem access to the config file.
+No `list` in v1. Later: `config` subcommands so UIs never need filesystem access to the config file.
 
 ## Omarchy bar
 

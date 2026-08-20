@@ -2,6 +2,14 @@
 
 This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy processes. The Omarchy bar plugin is a **separate** repo: `cloud-sql-tracker-oma-plugin`.
 
+## Git workflow (PRs)
+
+- Do **not** commit product/docs freezes straight to `main` when collaborating via history-friendly flow.
+- Branch from latest `main`: `wayfinder/<ticket>-short-slug` or `feat/…` / `docs/…`.
+- Open a **Pull Request** into `main`; link the Wayfinder issue (`Fixes #N` / `Closes #N` when the PR fully resolves it).
+- Prefer one logical decision or slice per PR so `main` history stays reviewable.
+- After merge, update the Wayfinder **map** Decisions-so-far if the PR closed a map ticket.
+
 ## Read before changing contracts
 
 | Doc | Why |
@@ -9,6 +17,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`CONTEXT.md`](./CONTEXT.md) | Domain language (Connection, Status document, Health state, Orphan, …) |
 | [`docs/DESIGN.md`](./docs/DESIGN.md) | Product decisions |
 | [`docs/adr/`](./docs/adr/) | Hard-to-reverse choices |
+| [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md) | **Argv, --version, exit codes** |
 | [`docs/status-document.v1.md`](./docs/status-document.v1.md) | **Full field-by-field meaning** of `status --json` |
 | [`schemas/status.v1.json`](./schemas/status.v1.json) | Machine-readable Status document schema |
 | [`examples/status.v1.json`](./examples/status.v1.json) | Golden snapshot |
@@ -18,11 +27,23 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 
 - **Only** `cloud-sql-tracker status --json` produces the Status document.
 - Schema id is integer field `version` (currently `1`). Binary semver is `cli_version`.
-- Do **not** invent a second parallel JSON shape for “list” that duplicates status. Plugin consumes **status only**.
-- Prefer **additive** optional fields; bump `version` only for breaking shape/meaning changes.
-- When you touch status fields: update **prose + JSON Schema + golden example** together, and say so in the PR/commit.
+- There is **no `list` command** in v1; do not invent a parallel status JSON. Plugin consumes **status only**.
+- Prefer **additive** optional fields; bump schema `version` only for breaking shape/meaning changes.
+- When you touch status fields: update **prose + JSON Schema + golden example** together in the same PR.
 
 If a JSON field is unclear, **open `docs/status-document.v1.md`** — that file exists specifically so agents and humans are not left guessing from a bare example.
+
+## Version string (single source)
+
+- Bump **`Cargo.toml` `[package].version` only** for releases.
+- `--version` / `-V` and Status `cli_version` must use `CARGO_PKG_VERSION` (or equivalent) — never a second hard-coded version in `main.rs`.
+- GitHub Release tags should match that package version (`v0.1.0` ↔ `0.1.0`).
+
+## CLI argv
+
+- Contract: [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md).
+- Multi-target start/stop is **not transactional**: partial failure leaves successes running (exit `1`).
+- `restart --failed` only targets Health state `error`.
 
 ## Implementation preferences
 

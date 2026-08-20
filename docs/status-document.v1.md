@@ -179,15 +179,15 @@ When `state !== "error"`, `error` should be `null`.
 
 ---
 
-## `list` vs `status` vs `config` (clarification)
+## `status` vs `config` (and no `list`)
 
 | Command | Role | JSON shape |
 |---------|------|------------|
 | `status --json` | Reconcile + **this** Status document | schema v1 |
-| `list` | **Not** a second Status schema. Exact behavior frozen on the argv ticket. Likely either removed, human-only, or a thin config inventory — **not** required for the plugin. |
+| `list` | **Not in v1** (dropped; see [`cli-contract.v1.md`](./cli-contract.v1.md)) | — |
 | `config …` | Later map/stretch: mutate/read `connections.json` through the CLI | config schema, not Status document |
 
-The plugin should call **`status --json` only** for bar state.
+The plugin should call **`status --json` only** for bar state. Full argv contract: [`cli-contract.v1.md`](./cli-contract.v1.md).
 
 ---
 
