@@ -19,6 +19,7 @@ cloud-sql-tracker stop --group backend
 | Design | [docs/DESIGN.md](docs/DESIGN.md) |
 | Status document v1 | [docs/status-document.v1.md](docs/status-document.v1.md) · [schema](schemas/status.v1.json) · [example](examples/status.v1.json) |
 | CLI contract v1 | [docs/cli-contract.v1.md](docs/cli-contract.v1.md) |
+| Config v1 | [docs/config.v1.md](docs/config.v1.md) · [schema](schemas/config.v1.json) · [example](examples/connections.json) |
 | Agent guide | [AGENTS.md](AGENTS.md) |
 | ADRs | [docs/adr/](docs/adr/) |
 | Research (tradeoffs) | [docs/RESEARCH.md](docs/RESEARCH.md) |
@@ -57,7 +58,7 @@ cp examples/connections.json ~/.config/cloud-sql-tracker/connections.json
 # edit ports/instances to match your project and DBeaver hosts
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the schema and the initial port map.
+Full rules: [docs/config.v1.md](docs/config.v1.md). Ports must not be 5432 / 3306 / 1433 (or 1–1023). Unknown JSON keys are errors.
 
 ## Commands (v1 contract)
 

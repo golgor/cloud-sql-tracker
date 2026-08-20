@@ -18,6 +18,9 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`docs/DESIGN.md`](./docs/DESIGN.md) | Product decisions |
 | [`docs/adr/`](./docs/adr/) | Hard-to-reverse choices |
 | [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md) | **Argv, --version, exit codes** |
+| [`docs/config.v1.md`](./docs/config.v1.md) | **connections.json validation + defaults merge** |
+| [`schemas/config.v1.json`](./schemas/config.v1.json) | Machine-readable config schema |
+| [`examples/connections.json`](./examples/connections.json) | Golden config |
 | [`docs/status-document.v1.md`](./docs/status-document.v1.md) | **Full field-by-field meaning** of `status --json` |
 | [`schemas/status.v1.json`](./schemas/status.v1.json) | Machine-readable Status document schema |
 | [`examples/status.v1.json`](./examples/status.v1.json) | Golden snapshot |
@@ -44,6 +47,13 @@ If a JSON field is unclear, **open `docs/status-document.v1.md`** — that file 
 - Contract: [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md).
 - Multi-target start/stop is **not transactional**: partial failure leaves successes running (exit `1`).
 - `restart --failed` only targets Health state `error`.
+
+## Config file
+
+- Contract: [`docs/config.v1.md`](./docs/config.v1.md).
+- **Reject unknown JSON keys** (exit 2). Do not “ignore extras.”
+- Unique `id`, `port`, and `instance`. Reserved ports: 5432, 3306, 1433 (+ all 1–1023).
+- When changing config rules: update **prose + JSON Schema + golden example** in the same PR.
 
 ## Implementation preferences
 

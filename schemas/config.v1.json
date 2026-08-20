@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/golgor/cloud-sql-tracker/schemas/config.v1.json",
+  "title": "cloud-sql-tracker connections.json v1",
+  "description": "Config file schema. Prose: docs/config.v1.md. Unknown properties are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "connections"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Config schema id. Must be 1 for this document."
+    },
+    "proxy_bin": {
+      "type": "string",
+      "minLength": 1,
+      "description": "cloud-sql-proxy binary name on PATH or absolute path. Default at runtime: cloud-sql-proxy."
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaultsObject",
+      "description": "Merged under each connection before per-connection fields. Built-in defaults apply underneath."
+    },
+    "connections": {
+      "type": "array",
+      "description": "Connection inventory. May be empty. After merge: unique id, port, and instance.",
+      "items": { "$ref": "#/$defs/connectionObject" }
+    }
+  },
+  "$defs": {
+    "port": {
+      "type": "integer",
+      "minimum": 1024,
+      "maximum": 65535,
+      "not": { "enum": [5432, 3306, 1433] },
+      "description": "Local listen port. Hard-forbidden: 1–1023 (via minimum), 5432 (Postgres), 3306 (MySQL), 1433 (SQL Server)."
+    },
+    "extraArgs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra argv tokens for cloud-sql-proxy (already split; no shell)."
+    },
+    "defaultsObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "group": { "type": "string", "minLength": 1 },
+        "instance": {
+          "type": "string",
+          "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$"
+        },
+        "port": { "$ref": "#/$defs/port" },
+        "address": { "type": "string", "minLength": 1 },
+        "private_ip": { "type": "boolean" },
+        "auto_iam_authn": { "type": "boolean" },
+        "extra_args": { "$ref": "#/$defs/extraArgs" },
+        "enabled": { "type": "boolean" }
+      },
+      "description": "Optional shared fields. id is not allowed in defaults (must be per-connection)."
+    },
+    "connectionObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "group", "instance", "port"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Stable id; unit name cloud-sql-proxy-<id>.service"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Display label"
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Group key for bulk actions and UI"
+        },
+        "instance": {
+          "type": "string",
+          "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$",
+          "description": "project:region:instance"
+        },
+        "port": { "$ref": "#/$defs/port" },
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Local bind address; runtime default 127.0.0.1"
+        },
+        "private_ip": { "type": "boolean" },
+        "auto_iam_authn": { "type": "boolean" },
+        "extra_args": { "$ref": "#/$defs/extraArgs" },
+        "enabled": {
+          "type": "boolean",
+          "description": "If false: visible in status; start/restart single-id refused; skipped in multi-target start"
+        }
+      }
+    }
+  }
+}
