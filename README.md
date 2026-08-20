@@ -17,6 +17,7 @@ cloud-sql-tracker stop --group backend
 | | |
 |--|--|
 | Design | [docs/DESIGN.md](docs/DESIGN.md) |
+| Research (tradeoffs) | [docs/RESEARCH.md](docs/RESEARCH.md) |
 | Example config | [examples/connections.json](examples/connections.json) |
 | Omarchy plugin | [cloud-sql-tracker-oma-plugin](https://github.com/golgor/cloud-sql-tracker-oma-plugin) |
 

@@ -2,6 +2,8 @@
 
 Decisions from a design grill (2026-08-20). Implementation details may evolve; product decisions below are the contract.
 
+Deeper tradeoff research (supervision model, language, proxy gotchas): [RESEARCH.md](./RESEARCH.md).
+
 ## Problem
 
 Track and control several Google Cloud SQL Auth Proxy processes from the desktop (and later an Omarchy bar plugin). Today this is a handful of one-line shell scripts with no ports, no status, and no safe concurrency against local Docker Postgres on 5432.
