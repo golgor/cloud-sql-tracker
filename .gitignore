@@ -6,3 +6,6 @@
 .DS_Store
 
 .wayfinder-out/
+
+# Local session handoff (do not commit)
+HANDOFF.md
