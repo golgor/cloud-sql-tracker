@@ -1,0 +1,3 @@
+# Modern stable Rust; prefer native Linux I/O over shell-outs
+
+Target **current stable Rust** with an explicit `rust-version` (MSRV) in `Cargo.toml` and `edition = "2021"` or newer as the toolchain allows. Prefer libraries and APIs that talk to the kernel or systemd directly — e.g. `std` TCP connect for liveness, procfs/`listeners` for port→PID, and `systemctl`/user D-Bus (`zbus`) for units — over parsing `ss`/`pgrep`/`bash` pipelines. Shell out only where the tool *is* the interface we want (notably `journalctl` for `logs`, and optionally `systemd-run` until a D-Bus path lands). Goal: small, testable adapters and fewer brittle CLI scrapers.

@@ -1,0 +1,3 @@
+# v1 health is unit state + local TCP accept, not Cloud SQL readiness
+
+A Connection is `running` when its Unit (or adopted Proxy process) is active and the configured local `address:port` accepts a TCP connect. Listener PID attribution uses in-process Linux socket/proc inspection (e.g. `listeners` / procfs), not shelling out to `ss`. We do **not** use `cloud-sql-proxy --health-check` in v1 because default HTTP ports collide across multiple proxies and readiness is a separate problem. That deeper check is deferred research (unique per-Connection `http_port` + `/startup`/`/readiness`), not a silent omission.

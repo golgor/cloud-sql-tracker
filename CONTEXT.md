@@ -39,3 +39,7 @@ _Avoid_: Service (alone), job
 **Supervisor**:
 systemd --user (via `systemd-run` / `systemctl --user`) as the process owner for managed Proxy processes.
 _Avoid_: Our CLI (the CLI is not long-lived)
+
+**ADC** (Application Default Credentials):
+Google’s standard credential discovery used by `cloud-sql-proxy` (typically `gcloud auth application-default login`). Hard requirement for operators; not optional in v1.
+_Avoid_: “gcloud login” alone (that is user credentials for gcloud CLI, not always ADC)

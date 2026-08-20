@@ -76,11 +76,30 @@ Global `defaults` merge under each connection.
 - Detect orphans (old bash scripts): cmdline + port match → report `running`; stop kills that PID; start is no-op if already healthy.
 - Do **not** enable shared default HTTP health/admin ports (9090/9091) per instance without unique ports.
 
+## Auth (hard requirement)
+
+Operators **must** have working [Application Default Credentials (ADC)](https://docs.cloud.google.com/docs/authentication/provide-credentials-adc) for Google Cloud before proxies will stay healthy.
+
+- We do **not** implement alternate auth paths in v1 (no SA JSON management UI, no `--token`, no embedding keys).
+- `cloud-sql-proxy` uses ADC by default; the control plane only ensures the Unit can *see* ADC (forward `HOME`, and `GOOGLE_APPLICATION_CREDENTIALS` when set; absolute `proxy_bin`).
+- `doctor` should fail hard when ADC is missing/unusable (exact checks: freeze on doctor ticket).
+- Colleagues are expected to run `gcloud auth application-default login` (or equivalent ADC setup) once per machine/user.
+
 ## Health states (v1)
 
 `stopped` | `starting` | `running` | `error`
 
-v1 running ≈ unit active (or adopted PID) **and** local port listening. Deeper readiness (ADC/private IP) can come later.
+v1 `running` ≈ unit active (or adopted PID) **and** local port accepting TCP. That is **local listener health**, not “Cloud SQL is reachable.”
+
+### Deferred research — proxy HTTP health-check
+
+Do **not** lose this thread (not in v1 destination):
+
+- `cloud-sql-proxy --health-check` exposes `/startup`, `/liveness`, `/readiness` on `--http-address`/`--http-port` (default `localhost:9090`).
+- **Collision:** one default HTTP port cannot be shared across N concurrent proxies — each Connection would need a unique `http_port` (config field) or health-check stays off.
+- Useful later for distinguishing “port open” vs “ADC/API/private-IP path broken” (stronger than TCP connect).
+- Tracked: [Deferred research: multi-proxy `--health-check` strategy](https://github.com/golgor/cloud-sql-tracker/issues/15) and map **Out of scope / stretch**.
+- Until then: never enable default 9090/9091 health/admin ports on every instance.
 
 ## CLI surface (planned)
 
@@ -114,6 +133,9 @@ Later: `config init|list|add|set|remove`.
 - Long-lived tracker daemon
 - Rewriting or bundling `cloud-sql-proxy`
 - Plugin writing config files directly
+- Alternate Google auth to ADC (keys-in-config, impersonation UX, etc.)
+- Proxy HTTP `--health-check` / admin ports as part of Health state (deferred research)
+- `logs --follow` streaming (dump-only first; see research brief)
 
 ## Build slices
 

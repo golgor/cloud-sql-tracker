@@ -1,0 +1,3 @@
+# Application Default Credentials are a hard requirement
+
+v1 assumes every operator already has working Google [ADC](https://docs.cloud.google.com/docs/authentication/provide-credentials-adc) (`gcloud auth application-default login` or equivalent). `cloud-sql-proxy` uses ADC by default; we only forward enough environment (`HOME`, optional `GOOGLE_APPLICATION_CREDENTIALS`) into user units so the proxy can read those credentials. We deliberately skip first-class support for service-account JSON in config, token flags, or other auth UIs — that complexity is out of scope for a desktop switchboard used by ADC-ready teammates. `doctor` should treat missing/broken ADC as a hard failure.
