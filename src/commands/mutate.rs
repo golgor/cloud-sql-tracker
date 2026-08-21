@@ -26,6 +26,13 @@ use crate::supervisor::{self, SupervisorError, UnitSnapshot};
 use super::select::{self, SelectError, Selector};
 use super::status::{self, StatusCommandError};
 
+/// `--wait-ms`'s default for `start`/`stop`/`restart`
+/// (`docs/cli-contract.v1.md`, "`start`": "Default: **10000** (10s)").
+/// Lives here, not in `cli`, because it is this module's own start-window
+/// interaction with Reconcile (`docs/modules.v1.md`, "commands": "Hides:
+/// `--wait-ms` default 10000").
+pub(crate) const DEFAULT_WAIT_MS: u64 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Outcomes.
 // ---------------------------------------------------------------------------

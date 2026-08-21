@@ -37,17 +37,13 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::commands::{
     self, BatchOutcome, LogsCommandError, SelectError, StatusCommandError, TargetOutcome,
-    TargetResult,
+    TargetResult, DEFAULT_WAIT_MS,
 };
 use crate::config::{self, Config, ConfigError};
 use crate::journal::Dump;
 use crate::model::{
     self, CheckStatus, DoctorReport, ErrorCode, HealthState, Source, StatusDocument,
 };
-
-/// `--wait-ms`'s default for `start`/`stop`/`restart`
-/// (`docs/cli-contract.v1.md`, "`start`": "Default: **10000** (10s)").
-const DEFAULT_WAIT_MS: u64 = 10_000;
 
 /// `--lines`'s default for `logs` (`docs/cli-contract.v1.md`, "`logs`").
 const DEFAULT_LOG_LINES: u32 = 100;
@@ -352,7 +348,13 @@ fn print_batch(outcome: &BatchOutcome) {
 fn print_target_outcome(target: &TargetOutcome) {
     match &target.result {
         TargetResult::Succeeded => println!("{}: ok", target.id),
-        TargetResult::SkippedDisabled => println!("{}: skipped (disabled)", target.id),
+        TargetResult::SkippedDisabled => {
+            // `docs/config.v1.md`, "v1 rule (normative)": disabled connections
+            // skipped in a multi-target selector are a **stderr** warning, not
+            // stdout — the operator still gets a clean success line count on
+            // stdout for what actually ran.
+            eprintln!("{}: skipped (disabled)", target.id);
+        }
         TargetResult::RefusedDisabled => {
             eprintln!("{}: refused — connection is disabled", target.id);
         }
@@ -422,11 +424,19 @@ fn run_logs(config_path: &Path, id: &str, lines: u32) -> i32 {
     match commands::logs(&config, id, lines) {
         Ok(Dump::Empty) => {
             // `docs/logs.v1.md`, "Empty journal / never started": exactly
-            // one hint line on stderr, empty stdout, exit 0.
-            let unit = model::unit_name(id)
-                .map(|unit| unit.to_string())
-                .unwrap_or_else(|_| format!("cloud-sql-proxy-{id}.service"));
-            eprintln!("no journal entries for unit {unit} (never started, vacuumed, or empty)");
+            // one hint line on stderr, empty stdout, exit 0. `commands::logs`
+            // only reaches `Ok` after its own `resolve_unit` already called
+            // `model::unit_name(id)` successfully (`docs/modules.v1.md`,
+            // "model": one owner for the unit-name string) — reuse that same
+            // call instead of a second, fallback copy of the format.
+            match model::unit_name(id) {
+                Ok(unit) => eprintln!(
+                    "no journal entries for unit {unit} (never started, vacuumed, or empty)"
+                ),
+                Err(_) => {
+                    eprintln!("no journal entries for `{id}` (never started, vacuumed, or empty)")
+                }
+            }
             0
         }
         Ok(Dump::Bytes(bytes)) => {
@@ -435,8 +445,23 @@ fn run_logs(config_path: &Path, id: &str, lines: u32) -> i32 {
             0
         }
         Err(err) => {
-            eprintln!("error: {err}");
+            print_logs_error(&err);
             logs_error_exit(&err)
+        }
+    }
+}
+
+/// `docs/logs.v1.md`, exit `3` row: "Message should suggest
+/// `cloud-sql-tracker doctor`" — only the dependency-class
+/// [`LogsCommandError::Journal`] case gets that suggestion; the usage-class
+/// (`2`) cases do not.
+fn print_logs_error(err: &LogsCommandError) {
+    match err {
+        LogsCommandError::Journal(_) => {
+            eprintln!("error: {err} (run `cloud-sql-tracker doctor` for details)");
+        }
+        LogsCommandError::UnknownId(_) | LogsCommandError::UnitName { .. } => {
+            eprintln!("error: {err}");
         }
     }
 }

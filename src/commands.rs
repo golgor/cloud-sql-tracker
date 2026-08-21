@@ -17,11 +17,11 @@ mod status;
 
 pub(crate) use doctor::doctor;
 pub(crate) use logs::{logs, LogsCommandError};
-pub(crate) use mutate::{restart, start, stop, BatchOutcome, TargetOutcome, TargetResult};
+pub(crate) use mutate::{
+    restart, start, stop, BatchOutcome, TargetOutcome, TargetResult, DEFAULT_WAIT_MS,
+};
 // `filter_failed` stays internal to `commands::mutate`'s own
-// `restart --failed` gather step (`super::select::filter_failed`); nothing
-// outside `commands` calls the re-exported path below.
-#[allow(unused_imports)]
-pub(crate) use select::filter_failed;
+// `restart --failed` gather step (`super::select::filter_failed`) — nothing
+// outside `commands` calls it, so it is not re-exported here.
 pub(crate) use select::{SelectError, Selector};
 pub(crate) use status::{status, StatusCommandError};
