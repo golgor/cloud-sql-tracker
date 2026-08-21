@@ -130,6 +130,18 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - Unique `id`, `port`, and `instance`. Reserved ports: 5432, 3306, 1433 (+ all 1–1023).
 - Sync rule: **Contract artifacts** (prose + schema + golden).
 
+## Code style
+
+Follow the **[Zen of Python](https://peps.python.org/pep-0020/)** in Rust too. **Readability counts.** Maintainability and ease of understanding beat clever, nested, or micro-efficient code.
+
+- Explicit is better than implicit.
+- Simple is better than complex. Complex is better than complicated.
+- Flat is better than nested.
+- Sparse is better than dense.
+- If the implementation is hard to explain, it is a bad idea.
+
+Prefer a short named function over a clever one-liner, a generic, or a macro. Name types from [`CONTEXT.md`](./CONTEXT.md). Reviewers reject “smart” code that is hard to read.
+
 ## Implementation preferences
 
 - Stateless CLI; long-lived work is `cloud-sql-proxy` under `systemd --user`.
@@ -145,6 +157,10 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - Planning decisions live on GitHub issues (map label `wayfinder:map`). Do not re-litigate closed tickets without an explicit reopen.
 - **One map, one job.** Spec freeze ≠ cargo-test-green. Proof lives on the implementation map ([`docs/verification.v1.md`](./docs/verification.v1.md)).
 
-## Freeze / contract PRs
+## Implement / review loop
 
-Before merge, two **fresh-context** reviewers in parallel: **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth). Paste the issue body and `git diff origin/main...HEAD` into the task (reviewers often have no `gh`). Parent applies should-fixes; reviewers are read-only. When a freeze requires tests, name the **pure fn** (do not invite a test trait).
+- **Implement** with a Sonnet-5 subagent on a worktree. Parent does not write product code.
+- When the implementer is done: dual GitHub review — **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth / **Code style**). Paste the issue body and `git diff origin/main...HEAD` (reviewers often have no `gh`).
+- Must-fix → Sonnet-5 again on the same branch. Repeat until **both** reviewers and the coder are satisfied.
+- Reviewers are read-only. Human squash-merges.
+- When a freeze requires tests, name the **pure fn** (do not invite a test trait).
