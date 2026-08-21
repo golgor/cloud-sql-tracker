@@ -15,7 +15,10 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::model::{self, Connection, ErrorCode, HealthState, Source, StatusError, StatusRow};
+use crate::model::{
+    self, Connection, ErrorCode, HealthState, PortObservation, PortProbe, Source, StatusError,
+    StatusRow,
+};
 
 /// The start window (`docs/reconcile.v1.md`, "Start window"): a Connection
 /// stays `starting` for at most this long after a start attempt before
@@ -86,25 +89,6 @@ pub(crate) struct FailureSignal {
     /// `ExecMainStatus`: the exit code, or (by systemd convention) 128 +
     /// signal number when the process was killed.
     pub(crate) exec_main_status: i32,
-}
-
-/// What we know about a Connection's local port right now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PortObservation {
-    pub(crate) probe: PortProbe,
-    /// Best-effort PID of whatever currently holds the listen socket.
-    pub(crate) listener_pid: Option<u32>,
-    /// Best-effort process name for that PID (e.g. `/proc/<pid>/comm`).
-    /// `error.detail` text only — never part of the Status schema.
-    pub(crate) listener_name: Option<String>,
-}
-
-/// A TCP probe result for a Connection's configured `address:port`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PortProbe {
-    Open,
-    Closed,
-    Unreachable,
 }
 
 // ---------------------------------------------------------------------------
