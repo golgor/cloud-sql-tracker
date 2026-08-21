@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/golgor/cloud-sql-tracker/schemas/doctor.v1.json",
+  "title": "cloud-sql-tracker Doctor report v1",
+  "description": "Output of `cloud-sql-tracker doctor --json`. Prose: docs/doctor.v1.md",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "cli_version", "ok", "checks"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Doctor report schema id. Breaking shape changes bump this integer."
+    },
+    "cli_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semver of the cloud-sql-tracker binary that produced this document."
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "true iff no check has status fail. Warnings do not clear ok."
+    },
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/check" },
+      "description": "Ordered checklist results."
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "status", "detail", "hint"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable check id (config, proxy_bin, systemd_user, adc, journal_user, ports, …)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail"],
+          "description": "pass = ok; warn = advisory; fail = hard failure for overall ok/exit."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Human-readable outcome."
+        },
+        "hint": {
+          "type": ["string", "null"],
+          "description": "Optional remediation or doc link; null when none."
+        }
+      }
+    }
+  }
+}

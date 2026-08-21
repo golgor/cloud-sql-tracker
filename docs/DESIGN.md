@@ -78,7 +78,7 @@ Operators **must** have working [Application Default Credentials (ADC)](https://
 
 - We do **not** implement alternate auth paths in v1 (no SA JSON management UI, no `--token`, no embedding keys).
 - `cloud-sql-proxy` uses ADC by default; the control plane only ensures the Unit can *see* ADC (forward `HOME`, and `GOOGLE_APPLICATION_CREDENTIALS` when set; absolute `proxy_bin`).
-- `doctor` should fail hard when ADC is missing/unusable (exact checks: freeze on doctor ticket).
+- `doctor` preflight: hard fail when ADC/config/bin/user-bus/journal missing or unusable; port conflicts are warns — full contract [`docs/doctor.v1.md`](./doctor.v1.md).
 - Colleagues are expected to run `gcloud auth application-default login` (or equivalent ADC setup) once per machine/user.
 
 ## Health states (v1)

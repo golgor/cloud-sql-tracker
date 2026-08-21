@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "cli_version": "0.1.0",
+  "ok": false,
+  "checks": [
+    {
+      "id": "config",
+      "status": "pass",
+      "detail": "/home/you/.config/cloud-sql-tracker/connections.json (7 connections)",
+      "hint": null
+    },
+    {
+      "id": "proxy_bin",
+      "status": "pass",
+      "detail": "/usr/bin/cloud-sql-proxy",
+      "hint": null
+    },
+    {
+      "id": "systemd_user",
+      "status": "pass",
+      "detail": "user systemd bus available",
+      "hint": null
+    },
+    {
+      "id": "adc",
+      "status": "fail",
+      "detail": "no Application Default Credentials file at ~/.config/gcloud/application_default_credentials.json and GOOGLE_APPLICATION_CREDENTIALS is unset",
+      "hint": "Run: gcloud auth application-default login — see https://cloud.google.com/docs/authentication/provide-credentials-adc"
+    },
+    {
+      "id": "journal_user",
+      "status": "pass",
+      "detail": "journalctl --user readable",
+      "hint": null
+    },
+    {
+      "id": "ports",
+      "status": "warn",
+      "detail": "fe-dev port 15434 held by cloud-sql-proxy (pid 12002); not our unit",
+      "hint": "Free the port (stop the leftover process) before start, or change the Connection port in config"
+    }
+  ]
+}
