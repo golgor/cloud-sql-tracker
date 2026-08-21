@@ -125,34 +125,43 @@ After the window, do **not** leave the row in eternal `starting`.
 
 ---
 
-## Conflict priority
+## Authority: truth table vs priority summary
 
-When signals disagree, apply **highest matching rule** (top wins):
+| Artifact | Role |
+|----------|------|
+| **Truth table** (next section) | **Normative** for implementers and tests — single source of row outcomes |
+| **Conflict priority** (below) | **Derived reading guide** only — same rules, ordered for humans when signals disagree |
 
-1. **Port held by Foreign process** (or listener PID **known** and ≠ Unit `MainPID` while unit claims the connection) → `error` / `port_in_use`
-2. **Unit truly failed** (exec/crash; not clean SIGTERM stop — see below) → `error` / `exec_failed` or `unit_failed`
-3. **Unit active (or activating with port already open) + port open + MainPID owns port or listener PID unknown** → `running` / `unit`
-4. **No active unit (inactive / not-found / clean failed-as-stopped) + matching Orphan + port open** → `running` / `orphan`
-5. **Inside start window + port closed** → `starting`
-6. **Past start window, still activating, port closed** → `error` / `start_timeout`
-7. **Unit active, port closed, outside start window** → `error` / `unit_failed` (listener not accepting)
-8. **Inactive/not-found, port closed, no Orphan** → `stopped` / `none`
+If prose and table ever drift, **fix the table** and then reword the summary. Do not maintain two independent rule sets.
 
-### PID attribution soft rule
+### Conflict priority (summary of the table)
+
+When scanning observations by hand, highest matching idea wins:
+
+1. Foreign / mismatched listener on the port → `error` / `port_in_use`
+2. True unit failure (not clean stop) → `error` / `exec_failed` or `unit_failed`
+3. Unit up + port open + PID OK/unknown → `running` / `unit`
+4. No our unit + matching Orphan + port open → `running` / `orphan`
+5. Start window + port closed → `starting`
+6. Activating past window, port closed → `start_timeout`
+7. Active past window, port closed → `unit_failed`
+8. Idle (inactive, port closed, no Orphan) → `stopped`
+
+### PID attribution (also in the table)
 
 | Listener PID | Interpretation |
 |--------------|----------------|
-| Unknown (lookup failed) + unit active + port open | **Trust** unit → `running` / `unit` (do not false-alarm) |
-| Known and equals `MainPID` | `running` / `unit` |
-| Known and ≠ `MainPID` (Foreign or other proxy) | `error` / `port_in_use` — two owners is not “healthy Orphan while unit active” |
-| No unit + Orphan match + port open | `running` / `orphan` |
+| Unknown + unit active + port open | Trust unit → `running` / `unit` |
+| Equals `MainPID` | `running` / `unit` |
+| Known ≠ `MainPID` | `error` / `port_in_use` |
+| No unit + Orphan + port open | `running` / `orphan` |
 | No unit + port open + not Orphan | `error` / `port_in_use` |
 
 ---
 
-## Truth table (normative sketch)
+## Truth table (normative)
 
-Unit column is simplified from systemd `ActiveState` (+ failed/clean handling). “Orphan” means match already true (#10). “Start window” as defined above.
+Unit column is simplified from systemd `ActiveState` (+ failed/clean handling). “Orphan” means match already true (#10). “Start window” as defined above. **This table is authoritative.**
 
 | Unit (simplified) | port_open | Process signal | Start window | → state | source | error.code |
 |-------------------|-----------|----------------|--------------|---------|--------|------------|
@@ -195,14 +204,38 @@ Subset of the Status catalog; new codes remain additive for consumers.
 
 ## Clean stop vs failed unit
 
-Managed Proxy processes **always** receive `--exit-zero-on-sigterm` on the unit argv we construct, so intentional stops should not look like crashes.
+Managed Proxy processes **always** receive `--exit-zero-on-sigterm` on the unit argv we construct, so intentional stops should exit **0** and usually leave the unit `inactive`/`dead` rather than `failed`.
 
-Belt and suspenders:
+### Lifecycle (not pure Reconcile)
 
-1. **Stop path (lifecycle, not pure Reconcile):** after `systemctl --user stop`, best-effort `reset-failed` on that unit name.  
-2. **Pure Reconcile:** if unit shows `failed` but result is consistent with clean SIGTERM-style termination, port is closed, and no matching process remains → treat as **`stopped`**, not `error`.
+After `systemctl --user stop` (or equivalent): best-effort **`reset-failed`** on that unit name so a later `status` sees `not-found`/`inactive` instead of a sticky `failed` row.
 
-True crashes (nonzero exit status, OOM, exec failure) stay `error`.
+### Pure Reconcile — when `ActiveState=failed` still means `stopped`
+
+Use this only as a **fallback** if `reset-failed` was skipped or raced. Classify as **`stopped` / `source: none`** when **all** of the following hold:
+
+1. `port_open === false`
+2. No live Proxy process attributed (`MainPID` is 0/absent; no Orphan match)
+3. Unit properties match a **clean termination** pattern (any one branch):
+
+| Branch | systemd fields (typical) | Meaning |
+|--------|--------------------------|--------|
+| A — preferred with our argv | `Result=success`, or `Result=exit-code` and `ExecMainStatus=0` | Proxy honored `--exit-zero-on-sigterm` |
+| B — signal stop without exit-zero | `Result=signal` and `ExecMainStatus=15` (**SIGTERM**) | Killed by default `KillSignal` |
+| C — proxy default SIGTERM exit | `Result=exit-code` and `ExecMainStatus=143` (128+15) | Process exited 143 after SIGTERM |
+
+Also require `ExecMainCode` consistent with exit/killed (implementers: treat unknown code + the Result/Status pairs above as sufficient when in doubt).
+
+### Still `error` (not clean stop)
+
+| Pattern | Typical fields | code |
+|---------|----------------|------|
+| Exec / binary failure | `Result=exit-code` or `exec-condition` / failed before running; often `ExecMainStatus≠0` early | `exec_failed` |
+| Crash / nonzero exit | `Result=exit-code`, `ExecMainStatus` not in `{0, 143}` | `unit_failed` |
+| SIGKILL / stop timeout | `Result=signal`, `ExecMainStatus=9` (**SIGKILL**), or `Result=timeout` | `unit_failed` |
+| OOM / core | `Result=core-dump` or oom-adjacent | `unit_failed` |
+
+Do **not** treat SIGKILL (9) as clean stop: that usually means stop timeout or manual kill -9.
 
 Orphans / hand-started proxies may lack `--exit-zero-on-sigterm`; stop-by-PID timing is #10.
 
