@@ -20,15 +20,32 @@
 //! `--json`-agnostic test binary. **Unchanged:** `cli::run()` takes no
 //! argv; `commands`/`config` visibility stays `pub(crate)`.
 //!
-//! **Residual risk (documented, not fixed here):** `status --json` talks
-//! to the real systemd user bus (`supervisor::show`). Some CI runners
-//! have no session bus (`docs/research/systemd-user-units.md`: "SSH-only
-//! ... contexts without a user manager"). The `status` test below still
-//! performs the full schema assertion whenever the bus is reachable
-//! (exit `0`), and degrades to a visible skip note instead of a hard
-//! failure only when the environment itself lacks a user bus (exit `3`,
-//! `doctor`'s own `systemd_user` row already reports `fail` in the same
-//! run) — it does not silently pass by ignoring a real regression.
+//! **Residual risk, and how this file resolves it (must-fix from PR #68
+//! review):** `status --json` on a **non-empty** config talks to the real
+//! systemd user bus (`supervisor::show`). Some CI runners have no session
+//! bus (`docs/research/systemd-user-units.md`: "SSH-only ... contexts
+//! without a user manager"), which would otherwise make that one
+//! assertion silently unexecuted in CI. Two separate tests split this
+//! apart instead of one bus-dependent test carrying the whole proof:
+//!
+//! - [`status_json_stdout_with_zero_connections_validates_against_the_status_schema`]
+//!   uses `connections: []`. `commands::status` never calls
+//!   `supervisor::show` / `port::observe` for an empty selector expansion
+//!   (`src/commands/select.rs::expand`), so this run needs **no** systemd
+//!   user bus and always exits `0`. This is the **unconditional** Layer 2
+//!   proof for the Status envelope shape issue #47 requires — it always
+//!   runs for real in CI, never skips.
+//! - [`status_json_stdout_validates_against_the_status_schema`] uses one
+//!   Connection and additionally proves the populated `connections[]`
+//!   row shape. It performs the full schema assertion whenever the bus is
+//!   reachable (exit `0`), and degrades to a visible skip note **only**
+//!   when stderr names the specific environmental causes
+//!   `SupervisorError::is_dependency` already classifies as "cannot
+//!   operate at all" (`src/supervisor.rs`): no session bus reachable, or
+//!   the bus is up but no systemd user manager is registered on it
+//!   (`ServiceUnknown`). Any other exit `3` (e.g. `MissingProperty` /
+//!   `MalformedProperty` — a real parsing regression against a bus that
+//!   **is** working) panics instead of skipping.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -69,13 +86,26 @@ impl Drop for ConfigFixture {
 /// One enabled Connection — enough to exercise `status --json` without
 /// depending on a real `cloud-sql-proxy` binary (a Unit systemd has never
 /// loaded reconciles to `stopped`, which is still a fully valid Status
-/// row).
+/// row). A synthetic id (`layer2-fixture`, not a real operator Connection
+/// like `fe-dev`) keeps this test's assertions independent of whatever
+/// Units happen to exist on the machine running it.
 const MINIMAL_CONFIG: &str = r#"{
     "version": 1,
     "connections": [
-        {"id": "fe-dev", "name": "FE Dev", "group": "fe", "instance": "proj:region:inst", "port": 15432}
+        {"id": "layer2-fixture", "name": "Layer 2 Fixture", "group": "fe", "instance": "proj:region:inst", "port": 15432}
     ]
 }"#;
+
+/// Zero Connections — `status --json` still produces a fully valid
+/// (empty) Status document from this (`docs/config.v1.md`: "Empty
+/// `connections: []` is valid"). `select::expand` on `Selector::All`
+/// with no Connections returns `Ok(vec![])`, so `commands::status` never
+/// calls `supervisor::show` / `port::observe` at all — this fixture's
+/// `status --json` run needs **no** systemd user bus and is therefore a
+/// hard, unconditional CI proof of the real stdout shape (see this file's
+/// module doc comment: the richer single-Connection test below still has
+/// to tolerate "no user bus" as an environment gap).
+const EMPTY_CONFIG: &str = r#"{"version": 1, "connections": []}"#;
 
 /// `docs/config.v1.md` is closed to unknown keys; `schemas/config.v1.json`
 /// sets `additionalProperties: false` at the top level. Matches
@@ -127,14 +157,54 @@ fn parse_stdout_json(stdout: &[u8]) -> serde_json::Value {
 // status --json
 // ---------------------------------------------------------------------------
 
-/// `status --json` stdout must validate against `schemas/status.v1.json`
-/// (`docs/verification.v1.md`, "Status / Doctor JSON": "does not replace
-/// #23 Layer 2"). A never-started Connection still reconciles to a fully
-/// valid `stopped` row — no real `cloud-sql-proxy` process is needed.
+/// **Hard, unconditional Layer 2 proof** — issue #47's first must-prove
+/// ("`status --json` stdout validates against `schemas/status.v1.json`").
+/// Zero Connections means `commands::status` never reaches
+/// `supervisor::show` / `port::observe` at all (`src/commands/select.rs`,
+/// `Selector::All` on an empty config returns `Ok(vec![])`), so this test
+/// needs no systemd user bus and must always exit `0`. This is the case
+/// this file's module doc comment says CI can rely on for real, every
+/// run — never a skip.
+#[test]
+fn status_json_stdout_with_zero_connections_validates_against_the_status_schema() {
+    let config = ConfigFixture::write(EMPTY_CONFIG);
+    let output = bin()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("spawn the binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "status --json on an empty config must always succeed (no supervisor \
+         I/O for zero Connections); stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let instance = parse_stdout_json(&output.stdout);
+    assert_validates("schemas/status.v1.json", &instance);
+    assert_eq!(instance["version"], 1);
+    assert_eq!(instance["total"], 0);
+    assert!(instance["connections"].as_array().unwrap().is_empty());
+}
+
+/// Richer proof over [`status_json_stdout_with_zero_connections_validates_against_the_status_schema`]:
+/// with one Connection, `status --json` stdout must also validate the
+/// populated `connections[]` row shape against `schemas/status.v1.json`.
+/// A never-started Connection still reconciles to a fully valid `stopped`
+/// row — no real `cloud-sql-proxy` process is needed.
 ///
-/// See this file's module doc comment for the documented systemd-user-bus
-/// residual risk this test degrades gracefully on, without silently
-/// skipping a real regression when the bus **is** reachable.
+/// This one **does** need the real systemd user bus
+/// (`supervisor::show`). See this file's module doc comment: the skip
+/// branch below only fires for the specific environmental causes
+/// `SupervisorError::is_dependency` classifies as "cannot operate at
+/// all" — never for an unrelated regression that also happens to exit
+/// `3`.
 #[test]
 fn status_json_stdout_validates_against_the_status_schema() {
     let config = ConfigFixture::write(MINIMAL_CONFIG);
@@ -154,26 +224,44 @@ fn status_json_stdout_validates_against_the_status_schema() {
             assert_validates("schemas/status.v1.json", &instance);
             assert_eq!(instance["version"], 1);
             assert_eq!(instance["connections"].as_array().unwrap().len(), 1);
-            assert_eq!(instance["connections"][0]["id"], "fe-dev");
+            assert_eq!(instance["connections"][0]["id"], "layer2-fixture");
         }
-        Some(3) => {
+        Some(3) if stderr_indicates_no_systemd_user_manager(&output.stderr) => {
             // `docs/cli-contract.v1.md`, "`status`": exit `3` is "a hard
             // dependency failure that prevents producing status" — the
-            // systemd user bus is unreachable in this environment
+            // systemd user bus is unreachable, or reachable but has no
+            // registered user manager, in this environment
             // (`docs/research/systemd-user-units.md`: "SSH-only ...
-            // contexts without a user manager"), not a code regression.
+            // contexts without a user manager"; `SupervisorError::
+            // is_dependency`), not a code regression.
             eprintln!(
-                "SKIP (environment): status --json exited 3 (no systemd user \
-                 bus in this environment) instead of validating stdout. \
-                 stderr:\n{}",
+                "SKIP (environment): status --json exited 3 with no systemd \
+                 user manager reachable in this environment, instead of \
+                 validating stdout. stderr:\n{}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
         other => panic!(
-            "unexpected exit {other:?} for status --json; stderr:\n{}",
+            "unexpected exit {other:?} for status --json (not a recognized \
+             \"no user manager\" environment gap — see \
+             stderr_indicates_no_systemd_user_manager); stderr:\n{}",
             String::from_utf8_lossy(&output.stderr)
         ),
     }
+}
+
+/// Whether `stderr` names one of the two environmental “cannot operate at
+/// all” causes `SupervisorError::is_dependency` classifies
+/// (`src/supervisor.rs`): no session bus reachable at all
+/// (`SupervisorError::Bus`'s message), or a bus that is reachable but has
+/// no systemd user manager registered on it (`ServiceUnknown`, wrapped by
+/// `SupervisorError::Call`). Anything else — in particular
+/// `MissingProperty` / `MalformedProperty`, which mean systemd **did**
+/// answer but this adapter misread the reply — is a real regression the
+/// caller must not treat as an environment skip.
+fn stderr_indicates_no_systemd_user_manager(stderr: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stderr);
+    text.contains("could not reach the systemd user bus") || text.contains("ServiceUnknown")
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +318,14 @@ fn doctor_json_stdout_validates_against_the_doctor_schema_with_a_valid_config() 
 /// (`docs/doctor.v1.md`, "Config load path").
 #[test]
 fn doctor_json_stdout_validates_against_the_doctor_schema_with_a_missing_config() {
+    // Same disposable-fixture unique-path scheme as `ConfigFixture`
+    // (PID + a monotonic counter) even though no file is ever created
+    // here — PID alone can collide with a stale leftover from a prior,
+    // possibly killed, test run using the same PID.
+    let unique = UNIQUE.fetch_add(1, Ordering::Relaxed);
     let mut missing = std::env::temp_dir();
     missing.push(format!(
-        "cloud-sql-tracker-cli-json-contracts-missing-{}.json",
+        "cloud-sql-tracker-cli-json-contracts-missing-{}-{unique}.json",
         std::process::id()
     ));
 
@@ -288,6 +381,19 @@ fn golden_config_matches_the_schema_and_the_binary_accepts_it() {
         ])
         .output()
         .expect("spawn the binary");
+
+    // `docs/cli-contract.v1.md`, "`doctor`": `0` (ok) or `3` (a check
+    // failed) are both legitimate outcomes — CI's environment may
+    // legitimately fail `systemd_user` / `adc` / `journal_user` even
+    // though `config` itself passes, matching the sibling doctor tests'
+    // discipline above.
+    assert!(
+        matches!(output.status.code(), Some(0) | Some(3)),
+        "unexpected exit {:?} for doctor --json on the golden config; stderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     let instance = parse_stdout_json(&output.stdout);
     let config_check = instance["checks"]
         .as_array()
@@ -296,12 +402,17 @@ fn golden_config_matches_the_schema_and_the_binary_accepts_it() {
         .find(|check| check["id"] == "config")
         .expect("doctor always reports a config check row");
     assert_eq!(config_check["status"], "pass");
+
+    // Derived from the golden itself, not hard-coded — adding an 8th
+    // golden Connection must not silently break this unrelated test.
+    let golden_connection_count = golden["connections"].as_array().unwrap().len();
+    let expected_detail_fragment = format!("({golden_connection_count} connections)");
     assert!(
         config_check["detail"]
             .as_str()
             .unwrap()
-            .contains("7 connections"),
-        "expected the golden's 7 connections in the config check detail, got: {}",
+            .contains(&expected_detail_fragment),
+        "expected the golden's {golden_connection_count} connections in the config check detail, got: {}",
         config_check["detail"]
     );
 }
