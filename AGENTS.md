@@ -2,6 +2,22 @@
 
 This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy processes. The Omarchy bar plugin is a **separate** repo: `cloud-sql-tracker-oma-plugin`.
 
+## Audience
+
+The operator is a **senior developer**. Treat design and trade-offs at that level.
+
+Experience that is already there:
+
+- Linux as a daily OS (Arch / Omarchy): packages, systemd as a user, files, permissions.
+- Containers and scripts. Not native Linux services.
+
+Experience that is **not** there:
+
+- Rust beyond basics (ownership, traits, Cargo features, MSRV).
+- Talking to the kernel or systemd from a program (`/proc`, D-Bus, zbus, transient Units, procfs).
+
+The operator wants to **learn** that native layer. When a Linux or Rust term first appears in chat, a research brief, or a PR comment, add **one short sentence** of what it is and why this Control plane uses it. Link a primary source (man page, systemd docs, The Rust Book, crate docs) when that helps. Do not skip D-Bus, Unit, `/proc`, clippy, or MSRV. Do not teach `pacman` or “what is a process.”
+
 ## Writing (chat, issues, docs, PR comments)
 
 Use terms from [`CONTEXT.md`](./CONTEXT.md). Write in **ASD-STE100 Simplified Technical English**:
