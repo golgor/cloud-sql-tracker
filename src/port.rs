@@ -142,15 +142,15 @@ fn all_processes_best_effort() -> impl Iterator<Item = Process> {
         .filter_map(Result::ok)
 }
 
-/// `pid`'s `/proc/<pid>/stat` `comm` (`docs/modules.v1.md`: holder name
-/// via `/proc/<pid>/comm`). `None` on any read failure — the process may
-/// have exited between attribution and this lookup.
+/// `pid`'s `/proc/<pid>/comm` (`docs/modules.v1.md`: holder name via
+/// `/proc/<pid>/comm`). Read directly rather than through `/proc/<pid>/stat`'s
+/// parenthesized `comm` field, so this never depends on a `stat`-line parser
+/// correctly re-finding the field's closing paren. `None` on any read
+/// failure — the process may have exited between attribution and this
+/// lookup.
 fn process_name(pid: u32) -> Option<String> {
-    Process::new(pid as i32)
-        .ok()?
-        .stat()
-        .ok()
-        .map(|stat| stat.comm)
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(comm.trim_end().to_string())
 }
 
 /// The single item of `items`, or `None` if there are zero or more than
@@ -267,5 +267,41 @@ mod tests {
         assert_eq!(observation.probe, PortProbe::Closed);
         assert_eq!(observation.listener_pid, None);
         assert_eq!(observation.listener_name, None);
+    }
+
+    // -- process_name: reads the plain `/proc/<pid>/comm` file, not the
+    // parenthesized, escapable `comm` field embedded in `/proc/<pid>/stat`
+    // (`docs/modules.v1.md`: "holder name via `/proc/<pid>/comm`") ---------
+
+    #[test]
+    fn process_name_matches_proc_pid_comm_for_the_current_process() {
+        let expected = std::fs::read_to_string("/proc/self/comm")
+            .expect("this process's own /proc/self/comm should be readable")
+            .trim_end()
+            .to_string();
+
+        let name = process_name(std::process::id());
+
+        assert_eq!(name, Some(expected));
+    }
+
+    #[test]
+    fn process_name_reads_the_kernel_assigned_comm_for_a_spawned_process() {
+        // The kernel sets `comm` from the basename of the executed file at
+        // `execve` time, truncated to 15 bytes — independent of `argv[0]`
+        // and unaffected by any `stat`-line parenthesis parsing. `sleep` is
+        // short enough to round-trip untruncated, giving an expected value
+        // that comes from the spawn call, not from `process_name` itself.
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawning `sleep` should succeed");
+
+        let name = process_name(child.id());
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(name, Some("sleep".to_string()));
     }
 }
