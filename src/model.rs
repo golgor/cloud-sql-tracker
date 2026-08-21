@@ -221,7 +221,8 @@ pub(crate) enum PortProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorCode {
-    /// `start` / `doctor` only (#43/#44) — `reconcile` never constructs this.
+    /// `start` only (#43) — `reconcile` never constructs this. `doctor`
+    /// (#44) reports a missing `proxy_bin` as its own `CheckRow`, not this.
     #[allow(dead_code)]
     BinMissing,
     PortInUse,
@@ -236,8 +237,9 @@ pub(crate) enum ErrorCode {
     /// string). `commands::status` (#42) constructs this per-row instead of
     /// failing the whole Status document.
     Config,
-    /// Fallback for `start`/`doctor` (#43/#44) — `reconcile` never
-    /// constructs this; its own unmapped cases already have named codes.
+    /// Fallback for `start` (#43) — `reconcile` never constructs this; its
+    /// own unmapped cases already have named codes. `doctor` (#44) has no
+    /// use for this: it reports `CheckRow`s, never a Status `error.code`.
     #[allow(dead_code)]
     Unknown,
 }

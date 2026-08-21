@@ -4,10 +4,10 @@
 //! (`docs/modules.v1.md`, "env — proxy binary + ADC"; ADC is a hard
 //! requirement, [ADR 0002](../docs/adr/0002-adc-only-auth.md)).
 //!
-//! `commands::doctor` (#44) calls the `*_check` rows below.
-//! `resolve_proxy_bin` / `adc_status` themselves are still only reachable
-//! from mutate (#43) and stay individually `#[allow(dead_code)]` until it
-//! lands.
+//! `commands::doctor` (#44) calls the `*_check` rows below, which already
+//! make `resolve_proxy_bin` / `adc_status` reachable — mutate (#43) will
+//! call them directly too, for **start**'s env forwarding, but neither
+//! function needs an `#[allow(dead_code)]` today.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

@@ -28,7 +28,10 @@ pub(crate) enum LogsCommandError {
 
 /// Dump `id`'s Unit's user-journal lines, most recent `lines` at most
 /// (`docs/logs.v1.md`). `config` is already loaded — `logs`'s fail-fast
-/// config load (unlike `doctor`) is `cli`'s (#45) job.
+/// config load (unlike `doctor`) is `cli`'s (#45) job. So is validating
+/// `lines`: `docs/logs.v1.md`, "`--lines N`": "Must be an integer ≥ 1" —
+/// a bad `--lines` is a usage error (exit `2`) `cli` must reject before
+/// calling this function, not a rule this module re-checks.
 ///
 /// Only reachable from `cli` (#45) so far — this ticket
 /// ([#44](https://github.com/golgor/cloud-sql-tracker/issues/44)) proves

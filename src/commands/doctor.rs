@@ -48,7 +48,7 @@ pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
         journal::journal_user_check(),
         ports_check(config),
     ];
-    let ok = !checks.iter().any(|check| check.status == CheckStatus::Fail);
+    let ok = all_checks_ok(&checks);
 
     DoctorReport {
         version: 1,
@@ -56,6 +56,14 @@ pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
         ok,
         checks,
     }
+}
+
+/// `docs/doctor.v1.md`, "Invariant": `ok === false` ⇔ some check has
+/// `status === "fail"`. Warns never affect `ok`. Pure and named so this
+/// one "⇔" rule in the contract has its own tests, independent of a real
+/// `doctor()` run (`AGENTS.md`, "name the pure fn").
+fn all_checks_ok(checks: &[CheckRow]) -> bool {
+    !checks.iter().any(|check| check.status == CheckStatus::Fail)
 }
 
 /// The `config` check (`docs/doctor.v1.md`, "`config` — hard"): the same
@@ -130,22 +138,36 @@ fn ports_check(config: Option<&Config>) -> CheckRow {
 }
 
 /// One Connection's port scan (`docs/doctor.v1.md`, "`ports`" table).
-/// `None` when nothing conflicts; `Some(detail)` when something else holds
-/// the port.
+/// `None` when nothing conflicts; `Some(detail)` when the scan found a
+/// conflict, or could not run for this Connection at all.
 ///
-/// A Connection whose `address` does not parse as an IP cannot be probed;
-/// it is skipped here rather than invented as a conflict —
-/// `commands::status` (#42) already reports that Connection's own row as
-/// `error`/`config`.
+/// A Connection whose `address` does not parse as an IP cannot be probed
+/// — that is a warn, not a silent pass: `ports` must not claim "OK" for a
+/// scan it never performed. (`commands::status` (#42) separately reports
+/// that Connection's own row as `error`/`config`; the two checks are
+/// independent.)
 fn port_conflict(connection: &Connection) -> Option<String> {
-    let address: IpAddr = connection.address.parse().ok()?;
+    let address: IpAddr = match connection.address.parse() {
+        Ok(address) => address,
+        Err(_) => return Some(unparseable_address_detail(connection)),
+    };
     let observation = port::observe(address, connection.port);
-    if observation.probe != PortProbe::Open {
-        // Skip the D-Bus round trip entirely when nothing is listening —
-        // `classify_port` below would reach the same "OK" verdict anyway.
-        return None;
-    }
-    classify_port(connection, &observation, our_unit_main_pid(connection))
+    let our_main_pid = if observation.probe == PortProbe::Open {
+        // Skip the D-Bus round trip entirely when we do not even need to
+        // attribute a listener — `classify_port` ignores this argument for
+        // every other probe outcome.
+        our_unit_main_pid(connection)
+    } else {
+        None
+    };
+    classify_port(connection, &observation, our_main_pid)
+}
+
+fn unparseable_address_detail(connection: &Connection) -> String {
+    format!(
+        "{} address `{}` is not an IP literal; port scan skipped",
+        connection.id, connection.address
+    )
 }
 
 /// Our Unit's `MainPID` for `connection`, or `None` when the Unit is not
@@ -168,18 +190,35 @@ fn our_unit_main_pid(connection: &Connection) -> Option<u32> {
 /// is our Unit MainPID" / "Anything else holds the port"). This ticket's
 /// own tests exercise every row of that table directly; [`port_conflict`]
 /// (impure) is the only caller.
+///
+/// [`PortProbe::Unreachable`] is not in that table — it means the probe
+/// itself could not determine whether the port was open or closed
+/// (`docs/modules.v1.md`, "port": `Unreachable` on timeout or any other
+/// connect error besides refused). Treating that as "nothing listening"
+/// would be a false pass, so it warns instead — the scan did not reach a
+/// verdict for this Connection.
 fn classify_port(
     connection: &Connection,
     observation: &PortObservation,
     our_main_pid: Option<u32>,
 ) -> Option<String> {
-    if observation.probe != PortProbe::Open {
-        return None; // "Nothing listening" -> OK.
+    match observation.probe {
+        PortProbe::Closed => None, // "Nothing listening" -> OK.
+        PortProbe::Unreachable => Some(unreachable_probe_detail(connection)),
+        PortProbe::Open
+            if observation.listener_pid.is_some() && observation.listener_pid == our_main_pid =>
+        {
+            None // "Listener is our Unit MainPID" -> OK.
+        }
+        PortProbe::Open => Some(port_conflict_detail(connection, observation)), // "Anything else" -> Conflict.
     }
-    if observation.listener_pid.is_some() && observation.listener_pid == our_main_pid {
-        return None; // "Listener is our Unit MainPID" -> OK.
-    }
-    Some(port_conflict_detail(connection, observation)) // "Anything else" -> Conflict.
+}
+
+fn unreachable_probe_detail(connection: &Connection) -> String {
+    format!(
+        "{} port {}: TCP probe was unreachable; could not confirm nothing is listening",
+        connection.id, connection.port
+    )
 }
 
 fn port_conflict_detail(connection: &Connection, observation: &PortObservation) -> String {
@@ -235,6 +274,45 @@ mod tests {
             listener_pid,
             listener_name: None,
         }
+    }
+
+    fn check_row(id: &str, status: CheckStatus) -> CheckRow {
+        CheckRow {
+            id: id.to_string(),
+            status,
+            detail: String::new(),
+            hint: None,
+        }
+    }
+
+    // -- all_checks_ok: the one ⇔ rule in docs/doctor.v1.md's Invariant ------
+
+    #[test]
+    fn all_checks_ok_is_true_when_every_check_passes() {
+        let checks = vec![
+            check_row("config", CheckStatus::Pass),
+            check_row("adc", CheckStatus::Pass),
+        ];
+        assert!(all_checks_ok(&checks));
+    }
+
+    #[test]
+    fn all_checks_ok_is_true_when_a_check_only_warns() {
+        // `docs/doctor.v1.md`, "Severity and `ok`": warns do not clear `ok`.
+        let checks = vec![
+            check_row("config", CheckStatus::Pass),
+            check_row("ports", CheckStatus::Warn),
+        ];
+        assert!(all_checks_ok(&checks));
+    }
+
+    #[test]
+    fn all_checks_ok_is_false_when_any_check_fails() {
+        let checks = vec![
+            check_row("config", CheckStatus::Pass),
+            check_row("adc", CheckStatus::Fail),
+        ];
+        assert!(!all_checks_ok(&checks));
     }
 
     // -- config_check ---------------------------------------------------------
@@ -303,6 +381,24 @@ mod tests {
         assert_eq!(row.detail, "no port conflicts");
     }
 
+    // -- port_conflict: the one branch that returns before any I/O --------------
+
+    #[test]
+    fn port_conflict_is_a_warning_when_the_address_is_not_an_ip_literal() {
+        // `docs/config.v1.md` only requires `address` to be a non-empty
+        // string, so a hostname is valid config; `port::observe` needs an
+        // `IpAddr`, so this Connection's scan cannot run at all. Returns
+        // before any `port::observe`/`supervisor::show` call, so this test
+        // never touches the network or a D-Bus session.
+        let mut hostname_connection = connection("fe-dev", 15432);
+        hostname_connection.address = "localhost".to_string();
+
+        let verdict = port_conflict(&hostname_connection);
+        let detail = verdict.expect("an unscannable address must warn, not silently pass");
+        assert!(detail.contains("fe-dev"));
+        assert!(detail.contains("localhost"));
+    }
+
     // -- classify_port: pure, every row of the docs/doctor.v1.md table ---------
 
     #[test]
@@ -313,10 +409,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_port_is_ok_when_probe_is_unreachable() {
+    fn classify_port_is_a_warning_when_probe_is_unreachable() {
+        // An `Unreachable` probe never established whether the port is
+        // closed or held — treating it as "nothing listening" would be a
+        // false pass (`docs/modules.v1.md`, "port": `Unreachable` is not
+        // `Closed`).
         let observation = port_observation(PortProbe::Unreachable, None);
         let verdict = classify_port(&connection("fe-dev", 15432), &observation, None);
-        assert_eq!(verdict, None);
+        let detail = verdict.expect("an unreachable probe must warn, not silently pass");
+        assert!(detail.contains("fe-dev"));
+        assert!(detail.contains("unreachable"));
     }
 
     #[test]
