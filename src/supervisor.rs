@@ -329,6 +329,10 @@ pub(crate) fn start_transient(
     Ok(())
 }
 
+/// Always appended exactly once by [`proxy_argv`], even if `extra_args`
+/// already repeats it.
+const EXIT_ZERO_ON_SIGTERM: &str = "--exit-zero-on-sigterm";
+
 /// The proxy argv for `ExecStart`, in the order
 /// `docs/research/supervisor-io.md` ("v1 D-Bus calls", `ExecStart`)
 /// specifies. `argv[0]` is always the absolute binary path (`execve`
@@ -347,8 +351,17 @@ fn proxy_argv(connection: &Connection, proxy_bin: &Path) -> Vec<String> {
     if connection.auto_iam_authn {
         argv.push("--auto-iam-authn".to_string());
     }
-    argv.extend(connection.extra_args.iter().cloned());
-    argv.push("--exit-zero-on-sigterm".to_string());
+    // A configured `extra_args` may already repeat this flag; keep exactly
+    // one copy, immediately before the final INSTANCE argument
+    // (`docs/research/supervisor-io.md`).
+    argv.extend(
+        connection
+            .extra_args
+            .iter()
+            .filter(|arg| arg.as_str() != EXIT_ZERO_ON_SIGTERM)
+            .cloned(),
+    );
+    argv.push(EXIT_ZERO_ON_SIGTERM.to_string());
     argv.push(connection.instance.clone());
     argv
 }
@@ -461,6 +474,20 @@ mod tests {
         for argv in [
             proxy_argv(&connection(false, false, vec![]), bin),
             proxy_argv(&connection(true, true, vec!["--a", "--b"]), bin),
+            // A configured `extra_args` that already repeats the flag (once
+            // or twice) must not produce a second or third copy.
+            proxy_argv(
+                &connection(false, false, vec!["--exit-zero-on-sigterm"]),
+                bin,
+            ),
+            proxy_argv(
+                &connection(
+                    false,
+                    false,
+                    vec!["--exit-zero-on-sigterm", "--a", "--exit-zero-on-sigterm"],
+                ),
+                bin,
+            ),
         ] {
             let count = argv
                 .iter()
