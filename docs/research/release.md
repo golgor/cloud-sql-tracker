@@ -6,6 +6,8 @@ For v1 dogfood, use `cargo install --path . --locked`; after the first release t
 
 Do not add `cargo-dist`, `cargo-deb`, or an in-tree `PKGBUILD` for v1. Keep the already-frozen release invariant in [`AGENTS.md`](../../AGENTS.md): `Cargo.toml` is the sole version source, tag `v0.1.0` corresponds to package version `0.1.0`, and runtime version output comes only from `CARGO_PKG_VERSION`.
 
+**Snapshot, not a second pin.** `v0.1.0` / `0.1.0` below are **examples of that invariant**, not a promise the first tag stays 0.1.0. When you cut a release, bump `[package].version` only, tag `v` + that number, and edit the examples here if they would confuse. Revisit AUR/`dist` using the triggers in Recommended v1 path — not on a calendar.
+
 ## Findings
 
 1. **Cargo install is sufficient for dogfood and a pinned source release.** Cargo officially supports local `--path` and remote `--git` sources, with Git selectors `--tag`, `--rev`, and `--branch`; installed executables go to the installation root's `bin` directory (normally `$HOME/.cargo/bin`). Cargo normally ignores a packaged lockfile for Git installs, so `--locked` is important here: it forces the checked-in `Cargo.lock` dependency set and fails if Cargo would need to change it. Recommended commands:
@@ -58,55 +60,3 @@ Do not add `cargo-dist`, `cargo-deb`, or an in-tree `PKGBUILD` for v1. Keep the 
 - **Medium:** The final binary target and compatibility floor were not validated against the implemented dependency graph. A `x86_64-unknown-linux-gnu` asset built on a newer glibc environment can fail on older distributions; test the actual tagged artifact on the target Omarchy machine before publishing it as supported.
 - **Low:** Demand for AUR cannot be established from documentation. Reassess after dogfood or user requests rather than predicting it.
 - **Low:** Checksums provide integrity checking but not publisher authentication. Signing/provenance can wait until distribution expands, but should be reconsidered before serving a broader audience.
-
-## Review findings
-
-- **No blocker:** The recommended path is compatible with `AGENTS.md` and issue #33 and adds no packaging or version surface.
-- **Advisory (`docs/research/release.md`):** Preserve the exact tag/version invariant and `--locked` examples when the research brief is copied into the repository.
-- **Advisory (future release workflow):** Test the uploaded archive on the actual Arch/Omarchy host; GitHub Release publication alone does not prove runtime compatibility.
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Concrete release/AUR findings, recommended commands, target file references, severity-ranked residual risks, and review findings are recorded in /tmp/wayfinder-impl/out-release.md."
-    }
-  ],
-  "changedFiles": [
-    "/tmp/wayfinder-impl/out-release.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "Read AGENTS.md and GitHub issue #33; research Cargo, GitHub Releases, Arch AUR/PKGBUILD/Rust packaging, dist, and cargo-deb primary documentation",
-      "result": "passed",
-      "summary": "Primary-source evidence was retrieved and synthesized into the research brief."
-    },
-    {
-      "command": "git branch/commit/push and gh issue comment",
-      "result": "not-run",
-      "summary": "This research subagent had no shell or gh tool; runtime instructions required the artifact only at /tmp/wayfinder-impl/out-release.md."
-    }
-  ],
-  "validationOutput": [
-    "Issue #33 body was fetched in full and all requested comparison points were answered.",
-    "AGENTS.md version-string section was read and the recommendation preserves Cargo.toml as the single source with v0.1.0 ↔ 0.1.0.",
-    "No packaging files were created."
-  ],
-  "residualRisks": [
-    "medium: future GitHub Release binary compatibility must be tested on the target Omarchy host, especially the glibc baseline.",
-    "low: AUR demand remains unknown until dogfood or user requests provide evidence.",
-    "low: branch creation, commit, push, blob URL, and issue comment remain for the parent/operator because no git/gh tool was available."
-  ],
-  "noStagedFiles": true,
-  "diffSummary": "Added one external research artifact recommending locked Cargo dogfood and a tagged GitHub release path, with AUR and packaging automation deferred.",
-  "reviewFindings": [
-    "no blockers: recommendation matches issue #33 and AGENTS.md version rules.",
-    "advisory: docs/research/release.md should retain --locked installs and the exact v-prefixed tag mapping.",
-    "advisory: test any release archive on the actual Arch/Omarchy host before calling it supported."
-  ],
-  "manualNotes": "The parent should persist the brief as docs/research/release.md on research/release, commit/push it, then comment on issue #33 with the gist and blob URL without closing or merging."
-}
-```

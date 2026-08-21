@@ -9,6 +9,8 @@ Human override (2026-08-21): the operator chose D-Bus over subprocess. That matc
 
 Same facts either way (Unit present, ActiveState, MainPID, start/stop, `reset-failed`). One pipe into frozen `supervisor`.
 
+**Snapshot, not a second pin.** Do not treat this brief as a zbus version pin. When [Implement supervisor module](https://github.com/golgor/cloud-sql-tracker/issues/40) lands, take a current `zbus` from crates.io, pin it in `Cargo.lock`, and note the version here if useful. Revisit if `Cargo.toml` and this brief disagree, or if blocking-API / D-Bus coverage changes.
+
 ## Findings
 
 1. **Recommendation — zbus in v1 (human decision).** `docs/modules.v1.md` hides either transport inside one concrete `supervisor` adapter and forbids a speculative supervisor trait. The research default was argv (smaller crate graph, docs already list `systemd-run` flags). The operator chose D-Bus so the Control plane does not parse `systemctl` text. Cost: add `zbus` (blocking API; default features include async/`block_on`). [zbus blocking API](https://docs.rs/zbus/latest/zbus/blocking/index.html) [zbus features](https://docs.rs/crate/zbus/latest/features) [ADR 0004](../adr/0004-rust-toolchain-and-linux-io.md) [local module freeze](../modules.v1.md)

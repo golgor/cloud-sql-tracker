@@ -6,6 +6,8 @@ Use **`jsonschema` 0.50 as a test-only Rust dependency**, with runtime schema co
 
 Do not use the compile-time macro or a separate CLI for Layer 2. Runtime loading tests the exact checked-in `schemas/*.v1.json` files against real built-binary stdout and config inputs, while avoiding macro and external-tool machinery.
 
+**Snapshot, not a second pin.** `jsonschema` 0.50 / 0.50.0 and MSRV 1.85 are what we looked up when researching. When Layer 2 lands, pin the then-current compatible crate in `Cargo.lock` and edit this file if the number moved. Revisit on crate major/API breaks or if `Cargo.toml` and this brief disagree.
+
 ## Recommendation
 
 Add only when issue #23 Layer 2 tests are implemented:
@@ -67,56 +69,3 @@ Call this helper with parsed stdout from the **built** `status --json` and `doct
 - This research did not execute a proof-of-concept because the ticket explicitly forbids implementing tests. The implementation PR should first compile the sketch against the then-selected 0.50.x lockfile and validate all three goldens.
 - `jsonschema` 0.50.0 is very recent and upstream has frequent releases/migrations. Keep it a private dev-dependency, pin through `Cargo.lock`, and review upgrades rather than exposing its types in project APIs.
 - The correct `format` assertion policy remains a contract interpretation risk; default Draft 2020-12 behavior may accept a malformed `date-time` string. Resolve explicitly when implementing Layer 2 rather than enabling it accidentally in only one test path.
-- No branch, commit, push, or issue comment was performed in this subagent runtime because only read/write and web-research tools were available, and the authoritative output override required this single file at `/tmp/wayfinder-impl/out-json-schema.md`.
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Concrete recommendation and severity-bearing residual risks are documented in /tmp/wayfinder-impl/out-json-schema.md, with repository paths schemas/*.v1.json, Cargo.toml, docs/adr/0004-rust-toolchain-and-linux-io.md, and docs/verification.v1.md."
-    }
-  ],
-  "changedFiles": [
-    "/tmp/wayfinder-impl/out-json-schema.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "Focused web/API research and repository file reads",
-      "result": "passed",
-      "summary": "Read issue 30, issue 23, all three schemas, verification Layer 2 notes, ADR 0004, Cargo.toml, and primary crate documentation/metadata."
-    },
-    {
-      "command": "cargo test",
-      "result": "not-run",
-      "summary": "Research-only ticket explicitly forbids implementing tests; no repository code changed."
-    },
-    {
-      "command": "git branch/commit/push and gh issue comment",
-      "result": "not-run",
-      "summary": "Git/gh execution tools were unavailable in this subagent runtime."
-    }
-  ],
-  "validationOutput": [
-    "All committed schemas declare JSON Schema Draft 2020-12.",
-    "Recommended jsonschema 0.50.0 declares MSRV 1.85, matching Cargo.toml rust-version 1.85.",
-    "Recommendation preserves issue #23 Layer 2 requirement to validate real Status/Doctor CLI stdout and config parser behavior."
-  ],
-  "residualRisks": [
-    "medium: schemas/status.v1.json format=date-time is not necessarily asserted under default Draft 2020-12 semantics; implementation must make the policy explicit.",
-    "low: jsonschema 0.50.0 is recent and fast-moving; keep it private, locked, and review upgrades.",
-    "high delivery: requested branch, commit, push, blob URL, and issue #30 comment remain outstanding because git/gh tools were unavailable."
-  ],
-  "noStagedFiles": true,
-  "diffSummary": "Created one authoritative research artifact recommending jsonschema 0.50 runtime validation with default features disabled; no repository files or tests changed.",
-  "reviewFindings": [
-    "no blocker in crate choice: jsonschema 0.50 matches Draft 2020-12 and repository MSRV.",
-    "medium: schemas/status.v1.json - date-time format assertion semantics must be decided explicitly during Layer 2 implementation.",
-    "medium: schemas/config.v1.json - schema cannot replace parser checks for cross-connection uniqueness and defaults-merge semantics.",
-    "high delivery: docs/research/json-schema-crate.md was not committed/pushed and issue #30 was not commented due unavailable git/gh tooling."
-  ],
-  "manualNotes": "The parent should persist this artifact into docs/research/json-schema-crate.md, then perform the requested branch/commit/push/comment workflow without closing issue #30."
-}
-```

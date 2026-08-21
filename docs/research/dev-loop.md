@@ -10,6 +10,8 @@ Use **mise as the documented local entry point**, but keep every task a thin, vi
 
 Pin one numbered Rust toolchain and set the same number as `package.rust-version`. Validate issue #23 Layer 1 through a small repository script invoked both by mise and the same CI workflow, so the schema/golden pair list has one source of truth.
 
+**Snapshot, not a second pin.** Toolchain numbers in this brief (e.g. current `rust-version = "1.85"`) are what we looked up when researching. When [Land toolchain, hk, and GitHub Actions](https://github.com/golgor/cloud-sql-tracker/issues/34) lands, pin the then-current stable in `mise.toml`, `Cargo.toml`, and CI **together**, and edit this file if the number moved. Revisit if those three and this brief disagree.
+
 ## Evidence
 
 ### mise should be the front door, not a second build system
@@ -137,56 +139,3 @@ Do not add nextest, cargo-watch, pitchfork, `--include-ignored`, product-contrac
 No workflow timing exists because implementation has not started. The one-job recommendation and the decision to defer nextest should be revisited from measured CI timing after the required test suite lands, not from synthetic benchmarks.
 
 ---
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "not-satisfied",
-      "evidence": "The focused primary-source research artifact was written to the authoritative runtime output path, but this subagent had no shell/gh tool and therefore could not create/push the requested branch or comment on issue #29."
-    }
-  ],
-  "changedFiles": [
-    "/tmp/wayfinder-impl/out-dev-loop.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "Read ADR 0004, docs/verification.v1.md, Cargo.toml, and existing research tone",
-      "result": "passed",
-      "summary": "Confirmed the explicit MSRV requirement, default cargo test bar, ignored-test prohibition, and current rust-version 1.85."
-    },
-    {
-      "command": "Fetch GitHub issues #29 and #23",
-      "result": "passed",
-      "summary": "Captured the complete research scope and Layer 1/Layer 2 contract-validation requirements."
-    },
-    {
-      "command": "Search primary documentation for mise, hk, GitHub Actions, Cargo/Clippy/rustfmt, nextest, and cargo-watch",
-      "result": "passed",
-      "summary": "Recommendations are supported only by first-party documentation."
-    },
-    {
-      "command": "git branch/commit/push and gh issue comment",
-      "result": "not-run",
-      "summary": "No shell or gh execution tool was available to this research subagent."
-    }
-  ],
-  "validationOutput": [
-    "Research covers every decision requested in issue #29: mise vs raw Cargo, hk pre-commit/pre-push, GitHub Actions commands and cache, ignored tests, nextest, cargo-watch, MSRV, and issue #23 Layer 1.",
-    "No product contracts or workflow implementation files were modified."
-  ],
-  "residualRisks": [
-    "Parent must copy the research body to docs/research/dev-loop.md, branch from refreshed origin/main, commit, push, and comment on issue #29.",
-    "CI/test timings do not yet exist; reassess workflow job splitting and nextest only after measurement."
-  ],
-  "noStagedFiles": true,
-  "diffSummary": "One research artifact recommending a thin mise/Cargo loop, hk hook split, one standard Cargo-based CI workflow, deferred nextest/cargo-watch, exact MSRV pinning, and a shared Layer 1 contract script.",
-  "reviewFindings": [
-    "no blockers in the research recommendation",
-    "operational blocker: branch push and issue comment remain for the parent because this subagent lacks shell/gh tooling"
-  ],
-  "manualNotes": "The Markdown before the acceptance report is ready to use as docs/research/dev-loop.md. Remove the acceptance-report block when copying it into the repository documentation file."
-}
-```

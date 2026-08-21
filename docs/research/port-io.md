@@ -4,6 +4,8 @@
 
 No reviewed crate implements the frozen `observe(address, port) -> PortObservation` operation end to end. Use **`std::net::TcpStream::connect_timeout` plus `procfs` 0.18 with default features disabled**: `std` owns the authoritative Open/Closed/Unreachable probe, while `procfs` supplies best-effort, address-aware listener inode → PID → name attribution. Do not add `listeners` or `nix`, and do not add a `Port` trait.
 
+**Snapshot, not a second pin.** `procfs` 0.18 / 0.18.0 is what we looked up when researching. When [Implement port module](https://github.com/golgor/cloud-sql-tracker/issues/39) lands, pin the then-current 0.18.x (or compatible) in `Cargo.lock` and edit this file if the number moved. Revisit if `Cargo.toml` and this brief disagree, or if sock_diag replaces `/proc/net/tcp`.
+
 ## Findings
 
 1. **No single crate is the product adapter.** `std::net::TcpStream::connect_timeout` opens one `SocketAddr` with a timeout and returns `io::Result<TcpStream>`; it does not identify the listener process. `listeners` and `procfs` identify/list sockets but do not perform the required accepting-connect probe. Therefore `src/port.rs` must compose liveness and attribution behind the frozen function rather than delegate the whole operation to one crate. [`TcpStream::connect_timeout`](https://doc.rust-lang.org/std/net/struct.TcpStream.html#method.connect_timeout) · [`listeners::get_process_by_port`](https://docs.rs/listeners/latest/listeners/fn.get_process_by_port.html) · [`procfs::net`](https://docs.rs/procfs/latest/procfs/net/index.html)
@@ -80,52 +82,4 @@ This shape preserves the frozen separation: connect success defines local livene
 - No runtime fixture was executed in this research-only pass. Implementation should test IPv4, IPv6, wildcard binds, a closed port, an inaccessible/vanished process, and ambiguous candidates on the target Linux environment.
 - `/proc/net/tcp{,6}` is deprecated by the kernel in favor of sock_diag. That is a known future migration risk, not a v1 blocker; keeping it inside the concrete `port` module localizes replacement without a trait.
 - The exact compatible-bind rule for IPv4-mapped IPv6 / `IPV6_V6ONLY` needs an implementation test. When attribution is uncertain, preserve liveness and return no PID.
-
-## Acceptance evidence
-
-- **Review finding (info):** `docs/research/port-io.md` recommendation is `std` + `procfs 0.18` with default features disabled; no product source implementation is proposed.
-- **Residual risk:** procfs snapshots race process/socket changes and may be restricted by permissions; the recommended observation explicitly degrades attribution to `None` without failing liveness.
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Concrete crate findings, recommendation, API sketch, source links, review finding, and residual risks are recorded in /tmp/wayfinder-impl/out-port-io.md; repository target path is docs/research/port-io.md."
-    }
-  ],
-  "changedFiles": [
-    "/tmp/wayfinder-impl/out-port-io.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "Read issue #32 and required repository documents; research official std/listeners/procfs/nix/kernel sources",
-      "result": "passed",
-      "summary": "Compared the four requested crate stacks against the frozen method and selected std + procfs."
-    },
-    {
-      "command": "Runtime crate fixture / cargo test",
-      "result": "not-run",
-      "summary": "Research-only task; no product code or Cargo dependency was changed."
-    }
-  ],
-  "validationOutput": [
-    "Issue #32 requires crate choice only, one stack, a PortObservation sketch, no trait, no port.rs implementation.",
-    "Primary docs confirm std supplies connect_timeout; procfs supplies address/state/inode, process FD socket inode, comm/exe; listeners port lookup lacks address; nix exposes only low-level sock-diag primitives."
-  ],
-  "residualRisks": [
-    "procfs snapshots are racy and PID/name visibility can be permission-limited; attribution must degrade to None without changing probe state.",
-    "IPv4-mapped IPv6 and wildcard-bind matching needs target-host tests.",
-    "The kernel marks /proc/net/tcp as deprecated in favor of tcp_diag, though it remains the frozen v1 route."
-  ],
-  "noStagedFiles": true,
-  "diffSummary": "One research artifact recommends std + procfs, compares listeners/procfs/nix/std, and sketches PortObservation and failure isolation.",
-  "reviewFindings": [
-    "info: docs/research/port-io.md - recommend std::net::TcpStream::connect_timeout plus procfs 0.18 with default features disabled; do not add listeners or nix.",
-    "no blockers: no product code, Port trait, Orphan adoption, ss invocation, or stop-by-PID behavior is proposed."
-  ],
-  "manualNotes": "The runtime output override limited this subagent to /tmp/wayfinder-impl/out-port-io.md; branch, commit, push, and issue-comment operations were not performed by this research subagent."
-}
-```
+- procfs snapshots race process/socket changes and may be restricted by permissions; degrade attribution to `None` without failing liveness.
