@@ -182,6 +182,27 @@ pub(crate) enum Source {
     None,
 }
 
+/// What we know about a Connection's local port right now
+/// (`docs/modules.v1.md`, "port — liveness + attribution"). `port::observe`
+/// (#39) produces this; Reconcile only classifies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PortObservation {
+    pub(crate) probe: PortProbe,
+    /// Best-effort PID of whatever currently holds the listen socket.
+    pub(crate) listener_pid: Option<u32>,
+    /// Best-effort process name for that PID (e.g. `/proc/<pid>/comm`).
+    /// `error.detail` text only — never part of the Status schema.
+    pub(crate) listener_name: Option<String>,
+}
+
+/// A TCP probe result for a Connection's configured `address:port`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortProbe {
+    Open,
+    Closed,
+    Unreachable,
+}
+
 /// Stable machine token for a Status row `error.code`
 /// (`docs/status-document.v1.md`, "error object"). New codes are additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
