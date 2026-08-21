@@ -48,8 +48,8 @@ Use these design terms exactly: **module**, **interface**, **implementation**, *
 One library crate + thin bin so unit tests do not go through `main`:
 
 ```text
-src/main.rs                 # bin: clap parse → commands → std::process::exit
-src/lib.rs                  # crate root; no clap
+src/main.rs                 # bin: std::process::exit(cli::run())
+src/lib.rs                  # crate root; no clap *types* outside `cli`
 
 src/cli.rs                  # clap derive, printing, exit mapping
 src/model.rs                # domain / JSON DTO types
@@ -71,6 +71,8 @@ src/commands/logs.rs        # internal facade
 Exact file names inside `commands/` may move; the **public seam** does not.
 
 **Visibility:** crate items used across modules are **`pub(crate)`**. This is **not** a public Rust library contract (no semver for `cloud_sql_tracker::…` outside the binary).
+
+`cli` lives in the lib crate so tests can call `cli::run` if needed; **clap types stay inside `cli`**. `main.rs` does not parse argv itself.
 
 **Not in v1 as public modules:** `status`, `lifecycle`, `proc`, `ops`, `trait Supervisor`, `trait Clock`, a second D-Bus supervisor adapter (zbus may replace `systemd-run` **inside** `supervisor` later). Shell completions are **out of CLI contract v1** — do not freeze them here.
 
@@ -106,9 +108,17 @@ model      → (almost) nothing
 
 **Interface:** structs/enums named in CONTEXT.md and JSON contracts: `Connection`, `HealthState`, `Source` (`unit` | `none` only), Status document / row, Doctor report / check row, Status `error.code` tokens.
 
+Also the **unit-name rule** (one owner):
+
+```text
+unit_name(id) -> UnitName   # `cloud-sql-proxy-<id>.service` (+ sanitizing)
+```
+
+`supervisor`, `journal`, Status `unit`, and Reconcile’s expected unit field all use this. Do not reimplement the string in three modules.
+
 **Hides:** serde attributes, JSON field names vs Rust names.
 
-**Depth:** modest. Shared vocabulary so `config` / `reconcile` / `commands` do not each invent DTOs. Helpers that encode **rules** belong with the module that owns the rule, not here.
+**Depth:** modest / **intentionally shallow** — shared vocabulary, not behavior. Deletion test: types reappear in every module; that is acceptable. Helpers that encode **non-naming rules** belong with the module that owns the rule, not here.
 
 **Not:** Reconcile math, file I/O, clap.
 
@@ -155,7 +165,7 @@ Matches [`docs/reconcile.v1.md`](./reconcile.v1.md). Same inputs ⇒ same output
 
 | Fn | Role |
 |----|------|
-| `show(unit) -> Result<UnitSnapshot>` | Load/missing, mapped ActiveState/SubState, MainPID, Result, start timestamp |
+| `show(unit) -> Result<UnitSnapshot>` | Load/missing, mapped ActiveState/SubState, MainPID, Result, **ExecMainStatus / ExecMainCode / signal**, start timestamp (everything Reconcile’s clean-stop vs crash table needs) |
 | `start_transient(connection, proxy_bin, env) -> Result<()>` | `Type=exec`, ADC env forward, name `cloud-sql-proxy-<id>.service`, **always** `--exit-zero-on-sigterm` on proxy argv |
 | `stop(unit) -> Result<()>` | **Our Unit only** — never kill-by-PID. Best-effort **`reset-failed` after stop** (and on restart) |
 | `systemd_user_check() -> CheckRow` | Doctor `systemd_user` (`status` / `detail` / `hint`) |
@@ -174,7 +184,7 @@ Matches [`docs/reconcile.v1.md`](./reconcile.v1.md). Same inputs ⇒ same output
 observe(address, port) -> PortObservation   # probe + listener_pid together
 ```
 
-`PortObservation`: TCP `Open` / `Closed` / `Unreachable` via `TcpStream::connect_timeout`, plus `listener_pid: Option<Pid>` via procfs/`listeners` — **not** `ss`.
+`PortObservation`: TCP `Open` / `Closed` / `Unreachable` via `TcpStream::connect_timeout`, plus `listener_pid: Option<Pid>` and best-effort **holder name** (`/proc/<pid>/comm`, optionally exe basename) via procfs/`listeners` — **not** `ss`. Name lookup must never fail the probe (Reconcile `error.detail` only).
 
 **Hides:** timeout, IPv4/IPv6, `/proc` walk.
 
@@ -203,12 +213,16 @@ Shell-out is the interface we want ([`docs/logs.v1.md`](./logs.v1.md)). No JSON 
 
 Shared owner for PATH / ADC file discovery. Doctor is a **caller**, not a second implementation.
 
-| Fn | Callers |
-|----|---------|
-| `resolve_proxy_bin(cfg_or_default) -> Result<PathBuf, …>` **or** `proxy_bin_check() -> CheckRow` | doctor `proxy_bin`; `start` (absolute path into systemd) |
-| `adc_check() -> CheckRow` (and enough data to forward env) | doctor `adc`; `start` (forward `HOME`, and `GOOGLE_APPLICATION_CREDENTIALS` when set) |
+| Fn | Role |
+|----|------|
+| `resolve_proxy_bin(cfg_or_default) -> Result<PathBuf, ProxyBinError>` | Absolute path for **start** |
+| `proxy_bin_check(cfg_or_default) -> CheckRow` | Doctor row, **built on** `resolve_proxy_bin` |
+| `adc_status() -> AdcStatus` | `{ present, path, gac_env_set }` for **start** env forwarding |
+| `adc_check() -> CheckRow` | Doctor row, **built on** `adc_status` |
 
 **Hides:** `which` / PATH walk, default ADC path `~/.config/gcloud/application_default_credentials.json`.
+
+Doctor does **not** re-implement PATH/ADC; it calls the `*_check` fns. Start calls `resolve_proxy_bin` + `adc_status` (not the CheckRow).
 
 Different I/O than unit lifecycle or journalctl — keep out of `supervisor` / `journal`.
 
@@ -223,11 +237,13 @@ What `cli` calls after argv is parsed. **Internal files** for readability (`sele
 | `status(cfg, selector) -> Result<StatusDocument, …>` | Per Connection: gather Observation (`supervisor.show` + `port.observe`), `reconcile`, assemble document (`version`, `cli_version` from `CARGO_PKG_VERSION`, aggregates). `status` with no target ⇒ all (CLI contract). |
 | `start(cfg, selector, wait_ms) -> BatchOutcome` | Expand selector; skip disabled per config rules; per id: reconcile, maybe start unit, wait window; **non-transactional** |
 | `stop(cfg, selector, wait_ms) -> BatchOutcome` | Our Unit only; `reset-failed` via supervisor; already stopped = success no-op |
-| `restart(cfg, selector, wait_ms, failed_only) -> BatchOutcome` | `--failed` keeps only Health `error`; empty after filter = success |
+| `restart(cfg, selector, wait_ms, failed_only) -> BatchOutcome` | After selector expansion, **`--failed` is an error-state filter** (keep Health `error` only — not a fourth selector). Empty after filter = success |
 | `doctor(cfg_path) -> DoctorReport` | Orchestrate six checks; **do not fail-fast** on bad config. Still run `proxy_bin`, `systemd_user`, `adc`, `journal_user` if config failed. |
+
+`BatchOutcome` is part of this **public-within-crate** seam (defined next to these fns, not buried as `select`-only).
 | `logs(cfg, id, lines) -> Result<Dump, …>` | Facade over `journal::dump` |
 
-**Hides:** `--wait-ms` default **10000**, start-window interaction with Reconcile, selector expansion (`id` / `--group` / `--all` / `--failed` / disabled-skip), Observation gather (one **internal** helper used by status and mutate).
+**Hides:** `--wait-ms` default **10000**, start-window interaction with Reconcile, selector expansion (`id` / `--group` / `--all` + disabled-skip), `--failed` filter, Observation gather (one **internal** helper used by status and mutate).
 
 **Selector:** wholly in `commands` (`select.rs`). `config` only `by_id`.
 
@@ -240,9 +256,9 @@ What `cli` calls after argv is parsed. **Internal files** for readability (`sele
 | `systemd_user` | `supervisor` |
 | `adc` | `env` |
 | `journal_user` | `journal` |
-| `ports` | `port` (warn-only; skip/pass if config not loaded — see doctor.v1) |
+| `ports` | **`commands::doctor`** stitches `port::observe` + `supervisor::show` (our Unit `MainPID` vs Foreign holder). `port` owns observation only; never a `bool` “in use?” that ignores the Unit. Warn-only; skip/pass if config not loaded — see doctor.v1. |
 
-Adapters that own a doctor check return a **CheckRow** (`status`, `detail`, `hint`), not a bare `bool`.
+Adapters that own a **single** doctor check return a **CheckRow** (`status`, `detail`, `hint`), not a bare `bool`. `ports` is the exception: it needs two adapters, so `commands` owns the row.
 
 ### `cli` — thin shell (clap)
 
@@ -255,9 +271,15 @@ Adapters that own a doctor check return a **CheckRow** (`status`, `detail`, `hin
 - `--version` / Status `cli_version` = `env!("CARGO_PKG_VERSION")` only.
 - Logs: `Dump::Empty` → stderr hint, empty stdout, exit 0; `Dump::Bytes` → stdout as-is.
 
-**Must not:** truth table, config uniqueness, systemd argv, PATH/ADC resolution.
+**Must not:** truth table, config uniqueness, systemd argv, PATH/ADC resolution. **Intentionally shallow** (binary adapter).
 
-`src/main.rs` is: parse → `commands` → `exit(code)`.
+`src/main.rs` is only:
+
+```rust
+fn main() {
+    std::process::exit(cli::run());
+}
+```
 
 ---
 
