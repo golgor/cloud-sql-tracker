@@ -6,13 +6,11 @@
 //! bus. No `systemd-run` / `systemctl` shell-out, no `trait Supervisor`.
 //!
 //! This module does not build Reconcile's `Observation` — it returns
-//! [`UnitSnapshot`], a supervisor-local shape. `commands` (#42+) will map
-//! that into `reconcile::UnitObservation`; until then nothing outside this
-//! module's own tests calls `show`/`start_transient`/`stop`/
-//! `systemd_user_check`, so the plain (non-test) library build sees them as
-//! dead code under `-D warnings`. Remove this `allow` once `commands` starts
-//! calling this module.
-#![allow(dead_code)]
+//! [`UnitSnapshot`], a supervisor-local shape. `commands::status` (#42) maps
+//! a `show` snapshot into `reconcile::UnitObservation`. `start_transient`,
+//! `stop`, and `systemd_user_check` are still only reachable from mutate
+//! (#43) / doctor (#44) and stay individually `#[allow(dead_code)]` until
+//! those land.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -290,6 +288,10 @@ fn read_snapshot(
 /// `env` is the already-resolved environment to forward (e.g. `HOME`,
 /// `GOOGLE_APPLICATION_CREDENTIALS`) — this module does not resolve ADC or
 /// `PATH` itself; that is `env`'s job (`docs/modules.v1.md`, "env").
+///
+/// Only reachable from mutate (#43) so far; `proxy_argv` below is already
+/// exercised directly by this module's own tests.
+#[allow(dead_code)]
 pub(crate) fn start_transient(
     connection: &Connection,
     proxy_bin: &Path,
@@ -370,6 +372,9 @@ fn proxy_argv(connection: &Connection, proxy_bin: &Path) -> Vec<String> {
 /// failed state (`docs/modules.v1.md`, "supervisor"). A Unit systemd has
 /// never loaded is already stopped: idempotent success, not an error
 /// (`docs/research/supervisor-io.md`, "stop").
+///
+/// Only reachable from mutate (#43) so far.
+#[allow(dead_code)]
 pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
     let conn = connect()?;
     let manager = manager_proxy(&conn)?;
@@ -387,6 +392,9 @@ pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
 
 /// Doctor's `systemd_user` row (`docs/doctor.v1.md`, "`systemd_user` —
 /// hard"): can this environment reach the systemd user manager at all.
+///
+/// Only reachable from `commands::doctor` (#44) so far.
+#[allow(dead_code)]
 pub(crate) fn systemd_user_check() -> CheckRow {
     match manager_version() {
         Ok(version) => CheckRow {

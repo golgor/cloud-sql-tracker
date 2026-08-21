@@ -3,6 +3,7 @@
 //! `src/main.rs` stays a thin binary; behavior lives in these modules.
 //! See `docs/modules.v1.md` for the frozen module seams.
 
+mod commands;
 mod config;
 mod env;
 mod journal;
