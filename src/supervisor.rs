@@ -7,10 +7,9 @@
 //!
 //! This module does not build Reconcile's `Observation` — it returns
 //! [`UnitSnapshot`], a supervisor-local shape. `commands::status` (#42) maps
-//! a `show` snapshot into `reconcile::UnitObservation`, and
+//! a `show` snapshot into `reconcile::UnitObservation`.
+//! `commands::mutate` (#43) calls `start_transient` and `stop`.
 //! `commands::doctor` (#44) calls `systemd_user_check` directly.
-//! `start_transient` and `stop` are still only reachable from mutate (#43)
-//! and stay individually `#[allow(dead_code)]` until it lands.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,6 +29,14 @@ const SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 /// it has never loaded — a successful "absent" outcome, not an I/O error
 /// (`docs/research/supervisor-io.md`, "Failure classification").
 const NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
+
+/// The generic D-Bus error a session bus returns for a well-known name with
+/// no owner and no activatable service — the shape a call to
+/// `org.freedesktop.systemd1` takes when the session bus itself is reachable
+/// but no systemd user manager is registered on it. Distinct from
+/// [`NO_SUCH_UNIT`], which is systemd's own error for a Unit **name** it has
+/// never loaded.
+const SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
 /// `TimeoutStopUSec` for a started proxy Unit: 30s, matching
 /// `docs/research/systemd-user-units.md` (`TimeoutStopSec=30`).
@@ -174,8 +181,31 @@ pub(crate) enum SupervisorError {
     UnitName(#[from] model::UnitNameError),
 }
 
+impl SupervisorError {
+    /// Whether this failure means "cannot operate at all" rather than
+    /// "this one Connection's operation failed"
+    /// (`docs/cli-contract.v1.md`, "Exit code table": exit `3`,
+    /// "Dependency": "no systemd user bus"). `commands::mutate` (#43) uses
+    /// this to keep a whole-command environmental failure distinct from a
+    /// per-Connection one, instead of every non-`Bus` variant collapsing
+    /// into the same generic per-id failure.
+    pub(crate) fn is_dependency(&self) -> bool {
+        match self {
+            SupervisorError::Bus(_) => true,
+            SupervisorError::Call(err) => is_service_unknown(err),
+            SupervisorError::MissingProperty { .. }
+            | SupervisorError::MalformedProperty { .. }
+            | SupervisorError::UnitName(_) => false,
+        }
+    }
+}
+
 fn is_no_such_unit(err: &zbus::Error) -> bool {
     matches!(err, zbus::Error::MethodError(name, _, _) if name.as_str() == NO_SUCH_UNIT)
+}
+
+fn is_service_unknown(err: &zbus::Error) -> bool {
+    matches!(err, zbus::Error::MethodError(name, _, _) if name.as_str() == SERVICE_UNKNOWN)
 }
 
 // ---------------------------------------------------------------------------
@@ -289,9 +319,6 @@ fn read_snapshot(
 /// `GOOGLE_APPLICATION_CREDENTIALS`) — this module does not resolve ADC or
 /// `PATH` itself; that is `env`'s job (`docs/modules.v1.md`, "env").
 ///
-/// Only reachable from mutate (#43) so far; `proxy_argv` below is already
-/// exercised directly by this module's own tests.
-#[allow(dead_code)]
 pub(crate) fn start_transient(
     connection: &Connection,
     proxy_bin: &Path,
@@ -300,6 +327,18 @@ pub(crate) fn start_transient(
     let unit = model::unit_name(&connection.id)?;
     let conn = connect()?;
     let manager = manager_proxy(&conn)?;
+
+    // A Unit that ended up `ActiveState=failed` (crash, exec failure, ...)
+    // stays loaded until something clears it — `StartTransientUnit` then
+    // rejects the same unit name with systemd's `UnitExists`. `stop`
+    // already clears this after a successful `StopUnit`
+    // (`docs/modules.v1.md`, "supervisor": "reset-failed after stop (and
+    // on restart)"), but a plain `start` on a Connection nobody stopped
+    // first (e.g. right after the proxy crashed on its own) never goes
+    // through `stop`. Best-effort here too: a failed reset must not abort
+    // the start attempt — `StartTransientUnit` below is the call that
+    // actually needs to succeed.
+    let _: Result<(), zbus::Error> = manager.call("ResetFailedUnit", &(unit.as_str(),));
 
     let exec_start: Vec<(String, Vec<String>, bool)> = vec![(
         proxy_bin.display().to_string(),
@@ -373,8 +412,6 @@ fn proxy_argv(connection: &Connection, proxy_bin: &Path) -> Vec<String> {
 /// never loaded is already stopped: idempotent success, not an error
 /// (`docs/research/supervisor-io.md`, "stop").
 ///
-/// Only reachable from mutate (#43) so far.
-#[allow(dead_code)]
 pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
     let conn = connect()?;
     let manager = manager_proxy(&conn)?;
@@ -420,6 +457,42 @@ fn manager_version() -> Result<String, SupervisorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- SupervisorError::is_dependency --------------------------------------
+    //
+    // `is_service_unknown`/`is_no_such_unit` themselves need a real
+    // `zbus::Message` inside `zbus::Error::MethodError`, which requires a
+    // live bus connection to construct — the same reason `is_no_such_unit`
+    // has no direct unit test. These exercise `is_dependency` through the
+    // variants that do not need one.
+
+    #[test]
+    fn is_dependency_is_true_for_a_bus_failure() {
+        let err = SupervisorError::Bus(zbus::Error::Address("no bus".to_string()));
+        assert!(err.is_dependency());
+    }
+
+    #[test]
+    fn is_dependency_is_false_for_a_missing_property() {
+        let err = SupervisorError::MissingProperty {
+            property: "MainPID",
+        };
+        assert!(!err.is_dependency());
+    }
+
+    #[test]
+    fn is_dependency_is_false_for_a_malformed_property() {
+        let err = SupervisorError::MalformedProperty {
+            property: "MainPID",
+        };
+        assert!(!err.is_dependency());
+    }
+
+    #[test]
+    fn is_dependency_is_false_for_a_unit_name_error() {
+        let err = SupervisorError::UnitName(model::UnitNameError::Empty);
+        assert!(!err.is_dependency());
+    }
 
     fn connection(private_ip: bool, auto_iam_authn: bool, extra_args: Vec<&str>) -> Connection {
         Connection {

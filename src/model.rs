@@ -221,26 +221,35 @@ pub(crate) enum PortProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorCode {
-    /// `start` only (#43) — `reconcile` never constructs this. `doctor`
-    /// (#44) reports a missing `proxy_bin` as its own `CheckRow`, not this.
+    /// Reserved for a per-Connection `proxy_bin` failure. `commands::start`
+    /// (#43) classifies an unresolved `proxy_bin` as a whole-command
+    /// dependency failure instead (`commands::mutate::TargetResult::
+    /// Dependency`) — `config.proxy_bin` is one value for the whole
+    /// config, so it fails identically for every target
+    /// (`docs/cli-contract.v1.md`, "Exit code table": exit `3`, "proxy
+    /// binary unresolved when required for the whole command"). Kept in
+    /// the catalog for a future per-Connection `proxy_bin` override;
+    /// `reconcile` never constructs this. Doctor reports missing
+    /// `proxy_bin` as a `CheckRow`, not this code.
     #[allow(dead_code)]
     BinMissing,
     PortInUse,
     ExecFailed,
     UnitFailed,
     StartTimeout,
-    /// `start` only (#43) — `reconcile` never constructs this.
-    #[allow(dead_code)]
+    /// `commands::start` (#43) constructs this when Application Default
+    /// Credentials are missing; `reconcile` never constructs this.
     Auth,
     /// A Connection field that only breaks at runtime, e.g. `address` is
     /// not a valid IP (`docs/config.v1.md` only requires a non-empty
     /// string). `commands::status` (#42) constructs this per-row instead of
-    /// failing the whole Status document.
+    /// failing the whole Status document; `commands::stop`/`restart` (#43)
+    /// also uses it for the (practically unreachable) case where a
+    /// config-valid id fails `model::unit_name`.
     Config,
-    /// Fallback for `start` (#43) — `reconcile` never constructs this; its
-    /// own unmapped cases already have named codes. `doctor` (#44) has no
-    /// use for this: it reports `CheckRow`s, never a Status `error.code`.
-    #[allow(dead_code)]
+    /// Fallback for `commands::start`/`stop`/`restart` (#43) — `reconcile`
+    /// never constructs this; its own unmapped cases already have named
+    /// codes. `doctor` reports `CheckRow`s, not this code.
     Unknown,
 }
 

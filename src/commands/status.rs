@@ -95,7 +95,13 @@ pub(crate) fn status(
 /// connections have `state: error` (errors are data)") — `docs/config.v1.md`
 /// only requires `address` to be a non-empty string, so this is a runtime
 /// possibility, not just a hypothetical.
-fn observe_and_reconcile(
+///
+/// `pub(super)`: `commands::mutate` (#43) reuses this same Observation
+/// gather + Reconcile round trip for `start`/`stop`/`restart`'s own
+/// idempotency checks and wait loops, rather than re-implementing it
+/// (`docs/modules.v1.md`, "commands": "Observation gather (one **internal**
+/// helper used by status and mutate)").
+pub(super) fn observe_and_reconcile(
     connection: &Connection,
     now: SystemTime,
     mono_now_usec: Option<u64>,
@@ -331,7 +337,10 @@ fn started_at_from_monotonic(
 /// In practice this is always `Some` on Linux: `rustix::time::clock_gettime`
 /// is infallible for `ClockId::Monotonic`, and the `Option` here only
 /// guards the `i64` -> `u64` conversion.
-fn monotonic_now_usec() -> Option<u64> {
+///
+/// `pub(super)`: `commands::mutate` (#43) reuses this for the same
+/// Observation gather `status` uses.
+pub(super) fn monotonic_now_usec() -> Option<u64> {
     let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
     let sec_usec = u64::try_from(now.tv_sec).ok()?.checked_mul(1_000_000)?;
     let nsec_usec = u64::try_from(now.tv_nsec).ok()? / 1_000;
