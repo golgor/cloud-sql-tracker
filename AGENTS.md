@@ -28,6 +28,8 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`docs/doctor.v1.md`](./docs/doctor.v1.md) | **Doctor** preflight checks + `doctor --json` |
 | [`schemas/doctor.v1.json`](./schemas/doctor.v1.json) | Machine-readable Doctor report schema |
 | [`examples/doctor.v1.json`](./examples/doctor.v1.json) | Golden doctor snapshot |
+| [`docs/logs.v1.md`](./docs/logs.v1.md) | **`logs` subcommand** (journalctl dump UX) |
+| [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
 | [`docs/research/`](./docs/research/) | systemd / port / journal research |
 
 ## Status document (critical)

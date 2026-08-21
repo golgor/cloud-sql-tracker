@@ -160,11 +160,13 @@ cloud-sql-tracker logs <ID> [--lines N]
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--lines N` | `100` | Journal line count |
+| `--lines N` | `100` | Journal line count (integer ≥ 1) |
 
 - Single id only (no `--group` / `--all` in v1).
-- No `--follow` in v1.
-- Stdout: plain journal text (see `docs/research/journalctl-logs.md`).
+- No `--follow` in v1. No `--json` on `logs` (plugin uses `status` / `doctor` JSON only).
+- Stdout: plain journal text via `journalctl --user` (see [`logs.v1.md`](./logs.v1.md)).
+- Empty journal → exit `0` + short stderr hint. Missing `journalctl` / unusable user journal → exit `3`.
+- Full behavior, argv template, exit codes: [`docs/logs.v1.md`](./logs.v1.md). Sample transcript: [`examples/logs.v1.txt`](../examples/logs.v1.txt).
 
 ### `doctor`
 
