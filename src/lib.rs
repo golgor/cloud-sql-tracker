@@ -5,5 +5,6 @@
 
 mod config;
 mod env;
+mod journal;
 mod model;
 mod reconcile;
