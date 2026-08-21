@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::config::Config;
 use crate::env;
 use crate::model::{self, Connection, ErrorCode, HealthState, Source, StatusRow, UnitName};
-use crate::supervisor::{self, SupervisorError, UnitActiveState, UnitSnapshot};
+use crate::supervisor::{self, SupervisorError, UnitSnapshot};
 
 use super::select::{self, SelectError, Selector};
 use super::status::{self, StatusCommandError};
@@ -343,6 +343,11 @@ fn stop_target(connection: &Connection, wait_ms: u64) -> TargetOutcome {
     outcome_for(&connection.id, try_stop(connection, wait_ms))
 }
 
+/// Plain `stop`'s entry point: Reconcile's Health `Stopped` is an
+/// idempotent no-op here (`docs/cli-contract.v1.md`, "`stop`":
+/// "Idempotency: already `stopped` -> success no-op") — a real
+/// `supervisor::stop` call is skipped entirely. `restart` must **not**
+/// share this shortcut; see [`try_stop_for_restart`].
 fn try_stop(connection: &Connection, wait_ms: u64) -> TargetResult {
     let row = match reconcile_now(connection) {
         Ok(row) => row,
@@ -351,7 +356,29 @@ fn try_stop(connection: &Connection, wait_ms: u64) -> TargetResult {
     if let Some(result) = stop_idempotent(&row) {
         return result;
     }
+    stop_unit_and_wait(connection, wait_ms)
+}
 
+/// `restart`'s stop step. Deliberately **skips** [`stop_idempotent`]'s
+/// Health-based shortcut: `docs/reconcile.v1.md`'s `deactivating` +
+/// closed-port row already reports Health `Stopped` while the Unit is
+/// still loaded (`docs/reconcile.v1.md:176`), and a fresh
+/// `StartTransientUnit` for a still-loaded unit name — even `Inactive`,
+/// even mid-`deactivating` — fails with systemd's `UnitExists`
+/// (`docs/research/supervisor-io.md`). `restart` always issues the real
+/// `supervisor::stop` call and waits for [`unit_safely_recreatable`]
+/// (Absent only) before `try_start`, regardless of what Reconcile's
+/// Health already says. `supervisor::stop` treats "Unit never loaded" as
+/// an idempotent success, so a Connection that was already fully stopped
+/// pays only one extra `GetUnit`/`StopUnit` round trip, not a real
+/// failure.
+fn try_stop_for_restart(connection: &Connection, wait_ms: u64) -> TargetResult {
+    stop_unit_and_wait(connection, wait_ms)
+}
+
+/// The real stop + wait, shared by [`try_stop`] (once its Health
+/// shortcut has ruled itself out) and [`try_stop_for_restart`] (always).
+fn stop_unit_and_wait(connection: &Connection, wait_ms: u64) -> TargetResult {
     let unit = match model::unit_name(&connection.id) {
         Ok(unit) => unit,
         Err(err) => {
@@ -371,31 +398,25 @@ fn try_stop(connection: &Connection, wait_ms: u64) -> TargetResult {
 }
 
 /// Whether `snapshot` means "safe to `StartTransientUnit` this unit name
-/// again" — `restart`'s stop-then-start handoff needs this, not just
-/// Reconcile's Health-based `stop` idempotency
-/// (`docs/research/supervisor-io.md`: a Unit systemd still has loaded,
-/// including one mid-`deactivating`, rejects a fresh transient start with
-/// `UnitExists`). `docs/reconcile.v1.md`'s `deactivating` + closed-port row
-/// already reports Health `Stopped` while the Unit itself is still loaded
-/// — this predicate reads the Unit's own `ActiveState` instead of going
-/// through Reconcile at all. A `Failed` Unit with no live process is also
-/// safe: `start_transient` already best-effort `ResetFailedUnit`s before
-/// its own `StartTransientUnit` (`docs/modules.v1.md`, "supervisor":
-/// "reset-failed after stop (and on restart)").
+/// again" — **Absent only**. `Manager.StartTransientUnit`'s `mode:
+/// "fail"` treats any Unit systemd still has loaded as an existing
+/// object — `Inactive`, `Failed`, mid-`deactivating`, all of them — so a
+/// fresh transient start for that same name fails with `UnitExists`
+/// regardless of `ActiveState` (`docs/research/supervisor-io.md`). Only a
+/// Unit systemd has fully unloaded (garbage-collected) is a valid
+/// `StartTransientUnit` target again.
+///
+/// This is deliberately **not** Reconcile's Health-based `stop`
+/// idempotency: `docs/reconcile.v1.md`'s `deactivating` + closed-port row
+/// already reports Health `Stopped` while the Unit itself is still
+/// loaded (`docs/reconcile.v1.md:176`) — exactly the shape that used to
+/// let `restart` race `StartTransientUnit` into `UnitExists`.
+/// `start_transient`'s own best-effort `ResetFailedUnit` (`docs/modules.
+/// v1.md`, "supervisor": "reset-failed after stop (and on restart)")
+/// only clears the *failed flag* — it does not unload a still-loaded
+/// Unit, so it cannot substitute for waiting here.
 fn unit_safely_recreatable(snapshot: &UnitSnapshot) -> bool {
-    match snapshot {
-        UnitSnapshot::Absent => true,
-        UnitSnapshot::Loaded {
-            active_state: UnitActiveState::Inactive,
-            ..
-        } => true,
-        UnitSnapshot::Loaded {
-            active_state: UnitActiveState::Failed,
-            main_pid,
-            ..
-        } => main_pid.is_none(),
-        UnitSnapshot::Loaded { .. } => false,
-    }
+    matches!(snapshot, UnitSnapshot::Absent)
 }
 
 /// `stop`'s wait loop, once a real `supervisor::stop` call has been made.
@@ -483,9 +504,12 @@ fn restart_target(
         return outcome_for(&connection.id, result);
     }
     // "for each target: stop then start (no deeper magic)"
-    // (`docs/cli-contract.v1.md`, "`restart`"). See [`stop_succeeded`] for
-    // why only a genuine success proceeds to `try_start`.
-    let stop_result = try_stop(connection, wait_ms);
+    // (`docs/cli-contract.v1.md`, "`restart`"). Uses [`try_stop_for_restart`],
+    // not [`try_stop`] — see its doc comment for why a Health-based
+    // idempotent stop is not safe before a fresh `StartTransientUnit`.
+    // See [`stop_succeeded`] for why only a genuine success proceeds to
+    // `try_start`.
+    let stop_result = try_stop_for_restart(connection, wait_ms);
     if !stop_succeeded(&stop_result) {
         return outcome_for(&connection.id, stop_result);
     }
@@ -696,6 +720,7 @@ fn wait_for(
 mod tests {
     use super::*;
     use crate::model::StatusError;
+    use crate::supervisor::UnitActiveState;
 
     fn connection(id: &str, enabled: bool) -> Connection {
         Connection {
@@ -1134,14 +1159,17 @@ mod tests {
     }
 
     #[test]
-    fn unit_safely_recreatable_is_true_when_absent() {
+    fn unit_safely_recreatable_is_true_only_when_absent() {
         assert!(unit_safely_recreatable(&UnitSnapshot::Absent));
     }
 
     #[test]
-    fn unit_safely_recreatable_is_true_when_inactive() {
+    fn unit_safely_recreatable_is_false_when_inactive_because_the_unit_is_still_loaded() {
+        // A successful `GetUnit` — even for `Inactive` — means systemd has
+        // not unloaded this unit name yet; `StartTransientUnit` for it
+        // still fails with `UnitExists`.
         let snapshot = loaded_snapshot(UnitActiveState::Inactive, None);
-        assert!(unit_safely_recreatable(&snapshot));
+        assert!(!unit_safely_recreatable(&snapshot));
     }
 
     #[test]
@@ -1167,12 +1195,14 @@ mod tests {
     }
 
     #[test]
-    fn unit_safely_recreatable_is_true_when_failed_with_no_live_process() {
-        // `start_transient` already best-effort `ResetFailedUnit`s before
-        // a fresh `StartTransientUnit`, so a failed Unit with no process
-        // left is safe to restart onto.
+    fn unit_safely_recreatable_is_false_when_failed_with_no_live_process_because_the_unit_is_still_loaded(
+    ) {
+        // `ResetFailedUnit` (best-effort, inside `start_transient`) only
+        // clears the failed flag — it does not unload the Unit, so a
+        // `Failed` snapshot is still "loaded" and still not a valid
+        // `StartTransientUnit` target.
         let snapshot = loaded_snapshot(UnitActiveState::Failed, None);
-        assert!(unit_safely_recreatable(&snapshot));
+        assert!(!unit_safely_recreatable(&snapshot));
     }
 
     #[test]
