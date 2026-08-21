@@ -40,10 +40,10 @@ Hit the **same interfaces** callers use ([`modules.v1.md`](./modules.v1.md)). No
 |---------|------------|
 | `config::parse` | Golden [`examples/connections.json`](../examples/connections.json) loads. Unknown keys, duplicate `id`/`port`/`instance`, reserved ports (5432/3306/1433 and 1–1023) **reject**. |
 | `reconcile` | **Every** truth-table row in [`reconcile.v1.md`](./reconcile.v1.md) with injected `now`. |
-| Status / Doctor JSON | Serialize fixture rows → validate against [`schemas/status.v1.json`](../schemas/status.v1.json) and [`schemas/doctor.v1.json`](../schemas/doctor.v1.json). Construct **Observation** in-process (no real units). This **is** [issue #23](https://github.com/golgor/cloud-sql-tracker/issues/23) **Layer 2** in-process. |
-| Selector | `id` / `--group` / `--all`; `enabled: false` skipped on multi-target start; **`--failed` is an error-state filter**, not a fourth selector. Empty after filter = success. |
-| `model::unit_name` | `cloud-sql-proxy-<id>.service` (single owner). |
-| `cli` smokes | `--version` / `-V` prints bare `CARGO_PKG_VERSION`. A **couple** of usage failures exit `2` (e.g. unknown id, missing start target, id+`--all`). **Not** a full argv matrix. |
+| Status / Doctor JSON | Serialize fixture rows → validate against [`schemas/status.v1.json`](../schemas/status.v1.json) and [`schemas/doctor.v1.json`](../schemas/doctor.v1.json). Construct **Observation** in-process (no real units). Shape proof for implementers; **does not** replace [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) Layer 2 (real `status --json` / `doctor --json` **stdout** vs schemas). |
+| Selector | `id` / `--group` / `--all`; `enabled: false` skipped on multi-target start; **`--failed` is an error-state filter**, not a fourth selector. Empty after filter = success. Test **pure** expansion `(cfg, selector) -> [Connection]` and the `--failed` filter over **already-reconciled** rows. Do **not** fake `supervisor` / add a trait / change the `commands` public seam. |
+| `model::unit_name` | `cloud-sql-proxy-<id>.service` (single owner), including id sanitizing. |
+| `cli` smokes | Spawn the **built binary** (`CARGO_BIN_EXE_*`); do **not** change `cli::run()` to take argv. `--version` / `-V` prints bare `CARGO_PKG_VERSION`. A **couple** of usage failures exit `2` (e.g. unknown id, missing start target, id+`--all`), using `--config` at a fixture. **Not** a full argv matrix. |
 
 `cargo test` (default) is the automated bar. GitHub Actions that run it belong to implementation / [#23](https://github.com/golgor/cloud-sql-tracker/issues/23), not this spec map.
 
@@ -92,7 +92,7 @@ Operator config is expected to match the seven Connections in the golden (ports 
 
 | Issue | After spec map closes |
 |-------|------------------------|
-| [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) CI | **Stays open.** Spec map does **not** wait. Implementation map **adopts** it. Layer 1 (goldens vs schemas) may merge whenever. **Do not close #23 on Layer 1 alone.** Layer 2 = the Status/Doctor/config cargo tests above. |
+| [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) CI | **Stays open.** Spec map does **not** wait. Implementation map **adopts** it. Layer 1 (goldens vs schemas) may merge whenever. **Do not close #23 on Layer 1 alone.** Layer 2 is **CLI stdout** (`status --json`, `doctor --json`) plus config parse vs schemas — in-process serde in the table above is necessary but **not sufficient** to close #23. |
 | [#15](https://github.com/golgor/cloud-sql-tracker/issues/15) proxy HTTP health | **Stays open**, **not** on the implementation map (stretch / future product). |
 
 ---

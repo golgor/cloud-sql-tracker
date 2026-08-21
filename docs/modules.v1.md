@@ -175,7 +175,7 @@ Matches [`docs/reconcile.v1.md`](./reconcile.v1.md). Same inputs ⇒ same output
 
 **Does not** build the Reconcile `Observation`. Returns `UnitSnapshot`; `commands` composes Observation with `port`.
 
-**Seam discipline:** one adapter (real systemd). **No `trait Supervisor`.** Reconcile tests construct `Observation` as structs. If #13 needs an in-process fake for `commands`, add that seam **then**.
+**Seam discipline:** one adapter (real systemd). **No `trait Supervisor`.** Reconcile tests construct `Observation` as structs. Selector expansion and `--failed` filtering are **pure** (see [`verification.v1.md`](./verification.v1.md)); do **not** add a commands fake / trait for tests.
 
 ### `port` — liveness + attribution
 

@@ -133,9 +133,7 @@ cloud-sql-tracker --version   # bare semver from Cargo.toml only
 
 What must be proven after implementation (not in this spec map): [`docs/verification.v1.md`](./verification.v1.md).
 
-- Required `cargo test`: config parse, reconcile truth table, Status/Doctor serde→schema, selector/`--failed`, `unit_name`, `--version` + a couple of exit-2 smokes.
-- Personal dogfood on 7 Connections; attest on the **implementation map**.
-- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) closes when contracts + this strategy are frozen. Building the CLI is a **new Wayfinder map**.
+Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) closes when contracts + that strategy are frozen. Building the CLI is a **new Wayfinder map**; dogfood is attested there.
 
 ## Non-goals (v1)
 
