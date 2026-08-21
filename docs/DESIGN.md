@@ -69,7 +69,7 @@ Highlights:
 - One `cloud-sql-proxy` process per connection, fixed `--port`.
 - Start via `systemd-run --user` transient unit `cloud-sql-proxy-<id>.service`.
 - Stop via systemd (SIGTERM then SIGKILL).
-- Detect orphans (old bash scripts): cmdline + port match → report `running`; stop kills that PID; start is no-op if already healthy.
+- **No Orphan adopt in v1:** port open without our Unit → `error` / `port_in_use` (detail may name the holder). `stop` only stops our Unit; leftover processes are cleared manually during migration.
 - Do **not** enable shared default HTTP health/admin ports (9090/9091) per instance without unique ports.
 
 ## Auth (hard requirement)
@@ -85,7 +85,7 @@ Operators **must** have working [Application Default Credentials (ADC)](https://
 
 `stopped` | `starting` | `running` | `error`
 
-v1 `running` ≈ unit active (or healthy Orphan) **and** local port accepting TCP. That is **local listener health**, not “Cloud SQL is reachable.”
+v1 `running` ≈ **our Unit** active **and** local port accepting TCP. That is **local listener health**, not “Cloud SQL is reachable.”
 
 Full observe → Health mapping (pure Reconcile, start window, truth table, error codes):
 [`docs/reconcile.v1.md`](./reconcile.v1.md).
@@ -144,7 +144,7 @@ cloud-sql-tracker --version   # bare semver from Cargo.toml only
 
 1. Config load + validate + `status --json` (stopped-only if nothing running)
 2. `start` / `stop` via systemd --user + port/pid reconcile
-3. Orphan adopt + `doctor` + `logs`
+3. `doctor` + `logs`
 4. Group targeting polish + wait/starting timeouts → `error`
 5. `config` subcommands
 
