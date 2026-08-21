@@ -8,7 +8,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 - Branch from latest `main`: `wayfinder/<ticket>-short-slug` or `feat/…` / `docs/…`.
 - Open a **Pull Request** into `main`; link the Wayfinder issue (`Fixes #N` / `Closes #N` when the PR fully resolves it).
 - Prefer one logical decision or slice per PR so `main` history stays reviewable.
-- After merge, update the Wayfinder **map** Decisions-so-far if the PR closed a map ticket.
+- After merge, update that map’s **Decisions so far** in the **same session**. GitHub may auto-close a parent map when the last child closes — still edit the body.
 
 ## Read before changing contracts
 
@@ -57,7 +57,7 @@ Frozen product surfaces use a small artifact set. **Same PR** must update every 
 - Touching a JSON field, enum, or validation rule → update **prose + schema + golden** together.
 - Prefer **additive** optional fields; bump document schema `version` only for breaking shape/meaning changes (see each prose doc).
 - New JSON contracts must add the full trio and a row in the table above.
-- CI: goldens must validate against schemas **and**, once the binary exists, CLI JSON (`status --json`, `doctor --json`) and config parse must match those schemas — [issue #23](https://github.com/golgor/cloud-sql-tracker/issues/23). Do not close #23 on golden-only checks.
+- CI: goldens must validate against schemas **and**, once the binary exists, CLI JSON (`status --json`, `doctor --json`) and config parse must match those schemas — [issue #23](https://github.com/golgor/cloud-sql-tracker/issues/23). Do not close #23 on golden-only checks **or** in-process serde alone.
 
 ## Status document (critical)
 
@@ -98,4 +98,10 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 
 ## Wayfinder
 
-Planning decisions live on GitHub issues (map label `wayfinder:map`). Do not re-litigate closed tickets without an explicit reopen.
+- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) is **closed**. Implementation is a **new map** (`/wayfinder`). Do not reopen #2 as parent.
+- Planning decisions live on GitHub issues (map label `wayfinder:map`). Do not re-litigate closed tickets without an explicit reopen.
+- **One map, one job.** Spec freeze ≠ cargo-test-green. Proof lives on the implementation map ([`docs/verification.v1.md`](./docs/verification.v1.md)).
+
+## Freeze / contract PRs
+
+Before merge, two **fresh-context** reviewers in parallel: **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth). Paste the issue body and `git diff origin/main...HEAD` into the task (reviewers often have no `gh`). Parent applies should-fixes; reviewers are read-only. When a freeze requires tests, name the **pure fn** (do not invite a test trait).
