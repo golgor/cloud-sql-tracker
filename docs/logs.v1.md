@@ -23,7 +23,7 @@ logs <id> [--lines N]
   resolve id from config → unit name cloud-sql-proxy-<id>.service
         │
         ▼
-  journalctl --user --unit=… --no-pager -n N -o short-iso
+  journalctl --user --unit=… --no-pager --quiet -n N -o short-iso
         │
         ▼
   stdout: journal lines (pass-through)
@@ -71,6 +71,7 @@ journalctl \
   --user \
   --unit=cloud-sql-proxy-<id>.service \
   --no-pager \
+  --quiet \
   -n <N> \
   -o short-iso
 ```
@@ -80,6 +81,7 @@ journalctl \
 | `--user` | Units are systemd --user |
 | `--unit=cloud-sql-proxy-<id>.service` | Same naming as supervisor research / Status `unit` field |
 | `--no-pager` | Non-interactive CLI |
+| `--quiet` / `-q` | **Required.** Suppress journalctl chrome (`Journal begins at …`, etc.) so empty vs lines is unambiguous |
 | `-n <N>` | Bound output; default N=100 (journalctl’s own default 10 is too small for proxy auth noise) |
 | `-o short-iso` | Readable timestamps for humans |
 
@@ -99,12 +101,16 @@ Do **not** pass `--follow` in v1.
 
 Soft success — **not** a hard failure.
 
+Because argv includes **`--quiet`**, journalctl chrome is not part of stdout. **Empty** means: `journalctl` exit 0 **and** captured stdout has **no non-whitespace bytes** (no log lines).
+
 | Condition | Exit | stdout | stderr |
 |-----------|------|--------|--------|
-| `journalctl` exits 0 with **no** matching lines (never started, vacuumed, GC’d transient unit, …) | **0** | empty (or only journalctl chrome if any) | One short hint, e.g. `no journal entries for unit cloud-sql-proxy-<id>.service (never started, vacuumed, or empty)` |
-| `journalctl` exits 0 with lines | **0** | those lines | no extra success noise |
+| Empty (never started, vacuumed, GC’d transient unit, unit never existed, …) | **0** | **empty** (no chrome, no banner) | Exactly one hint line, e.g. `no journal entries for unit cloud-sql-proxy-<id>.service (never started, vacuumed, or empty)` |
+| At least one log line | **0** | those lines, unchanged | **no** control-plane hint |
 
-Implementers may detect “zero lines” by capturing stdout when a hint is required, or by equivalent means — keep stdout free of control-plane banners when lines exist so `logs id | less` stays clean.
+**How to detect empty:** capture `journalctl` stdout (required for this decision). If empty → print the hint on **stderr**, nothing on stdout. If non-empty → write captured bytes to stdout as-is. Do not treat whitespace-only chrome as “has logs”; with `--quiet` there should be none.
+
+Do **not** put the hint on stdout (keeps `logs id | less` / pipes clean when there *are* lines, and when empty the hint stays on stderr).
 
 ---
 
@@ -112,10 +118,11 @@ Implementers may detect “zero lines” by capturing stdout when a hint is requ
 
 | Code | When |
 |------|------|
-| `0` | `journalctl` succeeded, including **zero** matching lines |
-| `2` | Usage / config: bad argv, unknown id, `--lines` missing/invalid (non-integer or &lt; 1), config load/validate failure |
-| `3` | Dependency: `journalctl` not found/executable, or user journal clearly unusable (same class as doctor `journal_user` / no user session). Message should suggest `cloud-sql-tracker doctor`. |
-| other | If `journalctl` fails for a real error after spawn, map to **3** when it is environmental/access; otherwise treat as command failure — prefer **3** for journal access problems so scripts can distinguish from usage (**2**). Do **not** use exit **1**/**4** multi-target batch codes (logs is single-id only). |
+| `0` | `journalctl` succeeded, including **empty** stdout (hint on stderr). Same as CLI table **Success**. |
+| `2` | Usage / config: bad argv, unknown id, `--lines` missing/invalid (non-integer or < 1), config load/validate failure. Same as CLI table **Usage / config**. |
+| `3` | Dependency: `journalctl` not found/executable, or user journal clearly unusable (doctor `journal_user` / no user session). Same as CLI table **Dependency**. Message should suggest `cloud-sql-tracker doctor`. If `journalctl` exits non-zero after spawn for access/environment reasons, map to **3** (do not pass through raw journalctl codes). |
+
+**Do not use `1` or `4` for `logs`** (those are multi-target / mutating-command batch codes). Canonical table: [`cli-contract.v1.md`](./cli-contract.v1.md) exit codes.
 
 ---
 
