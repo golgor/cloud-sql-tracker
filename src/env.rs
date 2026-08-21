@@ -30,7 +30,7 @@ const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
 pub(crate) fn resolve_proxy_bin(configured: Option<&str>) -> Result<PathBuf, ProxyBinError> {
     let name = configured.unwrap_or(DEFAULT_PROXY_BIN);
     let path_env = std::env::var_os("PATH").unwrap_or_default();
-    resolve_on_path(name, &path_env)
+    resolve_bin(name, &path_env)
 }
 
 /// Doctor's `proxy_bin` row (`docs/doctor.v1.md`, "`proxy_bin` — hard"),
@@ -62,18 +62,37 @@ fn check_row_for_proxy_bin(resolved: Result<PathBuf, ProxyBinError>) -> CheckRow
 
 /// [`resolve_proxy_bin`]'s search, taking an explicit `PATH` value so tests
 /// never touch the process environment.
-fn resolve_on_path(name: &str, path_env: &OsStr) -> Result<PathBuf, ProxyBinError> {
+///
+/// An absolute `name` must itself be an executable file. A bare `name` is
+/// searched on `PATH` like a shell would: the first executable match wins.
+/// If a bare name matches a file on `PATH` that exists but is not
+/// executable, that is reported as [`ProxyBinError::NotExecutable`] (the
+/// same distinction the absolute-path branch already makes) rather than a
+/// generic "not found" — a `+x`-only problem should not read like a
+/// missing binary.
+fn resolve_bin(name: &str, path_env: &OsStr) -> Result<PathBuf, ProxyBinError> {
     let candidate = Path::new(name);
     if candidate.is_absolute() {
         return require_executable_file(candidate).map(|()| candidate.to_path_buf());
     }
 
-    std::env::split_paths(path_env)
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable_file(candidate))
-        .ok_or_else(|| ProxyBinError::NotFound {
+    let mut non_executable_match = None;
+    for dir in std::env::split_paths(path_env) {
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+        if non_executable_match.is_none() && candidate.is_file() {
+            non_executable_match = Some(candidate);
+        }
+    }
+
+    match non_executable_match {
+        Some(path) => Err(ProxyBinError::NotExecutable { path }),
+        None => Err(ProxyBinError::NotFound {
             name: name.to_string(),
-        })
+        }),
+    }
 }
 
 fn require_executable_file(path: &Path) -> Result<(), ProxyBinError> {
@@ -209,14 +228,29 @@ fn missing_adc_detail(status: &AdcStatus) -> String {
             path.display()
         ),
         (Some(path), false) => format!(
-            "no Application Default Credentials file at {} and \
+            "no Application Default Credentials file at {} ({}) and \
              GOOGLE_APPLICATION_CREDENTIALS is unset",
-            path.display()
+            path.display(),
+            existing_file_reason(path)
         ),
         (None, _) => {
             "could not determine a home directory to look for Application Default Credentials"
                 .to_string()
         }
+    }
+}
+
+/// Whether a not-present ADC `path` is missing outright or exists but
+/// failed [`is_readable_file`] (`docs/doctor.v1.md`, "`adc` — hard": the
+/// file must exist **and** be readable). Only called for a `path` that is
+/// already known not to be present, so the wording is always a negative
+/// one of these two.
+fn existing_file_reason(path: &Path) -> &'static str {
+    let exists = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
+    if exists {
+        "exists but is unreadable"
+    } else {
+        "does not exist"
     }
 }
 
@@ -284,34 +318,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_on_path_finds_an_executable_bare_name() {
+    fn resolve_bin_finds_an_executable_bare_name() {
         let dir = TempDir::new("found");
         let bin = write_executable(dir.path(), "cloud-sql-proxy");
 
-        let resolved = resolve_on_path("cloud-sql-proxy", &path_env(&[dir.path()]))
+        let resolved = resolve_bin("cloud-sql-proxy", &path_env(&[dir.path()]))
             .expect("cloud-sql-proxy is executable on PATH");
 
         assert_eq!(resolved, bin);
     }
 
     #[test]
-    fn resolve_on_path_skips_a_non_executable_match_before_the_real_one() {
+    fn resolve_bin_skips_a_non_executable_match_before_the_real_one() {
         let wrong = TempDir::new("skip-wrong");
         let right = TempDir::new("skip-right");
         write_non_executable(wrong.path(), "cloud-sql-proxy");
         let bin = write_executable(right.path(), "cloud-sql-proxy");
 
-        let resolved = resolve_on_path("cloud-sql-proxy", &path_env(&[wrong.path(), right.path()]))
+        let resolved = resolve_bin("cloud-sql-proxy", &path_env(&[wrong.path(), right.path()]))
             .expect("the second PATH entry is executable");
 
         assert_eq!(resolved, bin);
     }
 
     #[test]
-    fn resolve_on_path_rejects_a_name_missing_from_every_entry() {
+    fn resolve_bin_rejects_a_name_missing_from_every_entry() {
         let dir = TempDir::new("missing");
 
-        let err = resolve_on_path("cloud-sql-proxy", &path_env(&[dir.path()]))
+        let err = resolve_bin("cloud-sql-proxy", &path_env(&[dir.path()]))
             .expect_err("no PATH entry has this name");
 
         assert_eq!(
@@ -323,22 +357,33 @@ mod tests {
     }
 
     #[test]
-    fn resolve_on_path_accepts_an_absolute_executable_path() {
+    fn resolve_bin_reports_not_executable_when_the_only_match_lacks_the_exec_bit() {
+        let dir = TempDir::new("path-not-executable");
+        let bin = write_non_executable(dir.path(), "cloud-sql-proxy");
+
+        let err = resolve_bin("cloud-sql-proxy", &path_env(&[dir.path()]))
+            .expect_err("the only PATH match is not executable");
+
+        assert_eq!(err, ProxyBinError::NotExecutable { path: bin });
+    }
+
+    #[test]
+    fn resolve_bin_accepts_an_absolute_executable_path() {
         let dir = TempDir::new("absolute-ok");
         let bin = write_executable(dir.path(), "cloud-sql-proxy");
 
-        let resolved = resolve_on_path(bin.to_str().unwrap(), &path_env(&[]))
+        let resolved = resolve_bin(bin.to_str().unwrap(), &path_env(&[]))
             .expect("absolute path is executable");
 
         assert_eq!(resolved, bin);
     }
 
     #[test]
-    fn resolve_on_path_rejects_an_absolute_non_executable_path() {
+    fn resolve_bin_rejects_an_absolute_non_executable_path() {
         let dir = TempDir::new("absolute-bad");
         let bin = write_non_executable(dir.path(), "cloud-sql-proxy");
 
-        let err = resolve_on_path(bin.to_str().unwrap(), &path_env(&[]))
+        let err = resolve_bin(bin.to_str().unwrap(), &path_env(&[]))
             .expect_err("absolute path is not executable");
 
         assert_eq!(err, ProxyBinError::NotExecutable { path: bin });
@@ -414,6 +459,37 @@ mod tests {
         assert!(!status.present);
         assert_eq!(status.path, Some(dir.path().join(ADC_RELATIVE_PATH)));
         assert!(!status.gac_env_set);
+    }
+
+    #[test]
+    fn resolve_adc_status_reports_absent_when_the_default_file_exists_but_is_unreadable() {
+        let dir = TempDir::new("adc-default-restricted");
+        let path = write_default_adc_file(dir.path());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000))
+            .expect("remove read permission from fixture ADC file");
+
+        let status = resolve_adc_status(Some(dir.path()), None);
+
+        assert!(!status.present);
+        assert_eq!(status.path, Some(path));
+        assert!(!status.gac_env_set);
+    }
+
+    #[test]
+    fn adc_check_fail_detail_says_unreadable_for_an_existing_but_unreadable_default_file() {
+        let dir = TempDir::new("adc-check-restricted");
+        let path = write_default_adc_file(dir.path());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000))
+            .expect("remove read permission from fixture ADC file");
+
+        let row = check_row_for_adc(resolve_adc_status(Some(dir.path()), None));
+
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(
+            row.detail.contains("unreadable"),
+            "detail should say the file is unreadable, got: {}",
+            row.detail
+        );
     }
 
     #[test]
