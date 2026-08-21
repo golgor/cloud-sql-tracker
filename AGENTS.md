@@ -20,7 +20,7 @@ The operator wants to **learn** that native layer. When a Linux or Rust term fir
 
 ## Writing (chat, issues, docs, PR comments)
 
-Use terms from [`CONTEXT.md`](./CONTEXT.md). Write in **ASD-STE100 Simplified Technical English**:
+Use terms from [`CONTEXT.md`](./CONTEXT.md). Write in **[ASD-STE100](https://www.asd-ste100.org/) Simplified Technical English** (controlled English for technical docs: short sentences, one idea each, same word for the same thing):
 
 - Use short sentences. Put one idea in each sentence.
 - Use the same word for the same thing.
@@ -33,9 +33,17 @@ When you state a **choice**, use this order:
 3. **Discarded** — what we do not use, and why (one line).
 4. **Unchanged** — what this choice does not change.
 
-Start with the Pick. A discard-first gist hid “we use mise” in the implementation-map research.
+Start with the Pick. Wrong: “Not nextest; no cargo-watch; mise wraps cargo.” Right:
 
-**Research briefs** live in [`docs/research/`](./docs/research/). They are human prose. Do not put subagent `acceptance-report` JSON or `/tmp` paths in them. Crate and toolchain numbers in a brief are **snapshots**. Pin the version on the implement ticket. Put a **gist + file path** on that ticket. Do not point only at a closed GitHub issue.
+> **Pick:** mise tasks wrap cargo. **Why:** one toolchain and the same commands locally and in CI. **Discarded:** nextest (crate is small). **Unchanged:** `cargo test` stays the bar.
+
+**Research briefs** live in [`docs/research/`](./docs/research/). They are human prose. Do not put subagent `acceptance-report` JSON or `/tmp` paths in them. Crate and toolchain numbers in a brief are **snapshots**. On the **implementation ticket**, under `## Question`, put:
+
+- **Brief:** path to `docs/research/…`
+- **Gist:** Pick in one line
+- **Pin:** the crate or toolchain version this slice locks (or “pin then-current X.Y when landing”)
+
+Do not point only at a closed GitHub issue.
 
 ## Git workflow (PRs)
 
@@ -67,7 +75,7 @@ Start with the Pick. A discard-first gist hid “we use mise” in the implement
 | [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
 | [`docs/modules.v1.md`](./docs/modules.v1.md) | **Rust module seams** (`src/` layout, pure vs I/O) |
 | [`docs/verification.v1.md`](./docs/verification.v1.md) | **Test + dogfood strategy** (cargo bar, human gate, next map) |
-| [`docs/research/`](./docs/research/) | Adapter I/O, CI/dev-loop, crates. **Read the matching brief** before that implement ticket. |
+| [`docs/research/`](./docs/research/) | Adapter I/O, CI/dev-loop, crates. **Read the matching brief** before working on that implementation ticket. |
 
 ## Contract artifacts (keep in sync)
 
