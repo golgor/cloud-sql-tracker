@@ -45,13 +45,17 @@ Start with the Pick. Wrong: “Not nextest; no cargo-watch; mise wraps cargo.”
 
 Do not point only at a closed GitHub issue.
 
+**HITL / dogfood tickets:** the issue body must list **checkbox steps** the human can tick. Linking [`docs/verification.v1.md`](./docs/verification.v1.md) alone is not enough. Normative text stays in the doc; the issue is the working checklist. Attest on the **implementation map**, not a closed spec map.
+
 ## Git workflow (PRs)
 
 - Do **not** commit product/docs freezes straight to `main` when collaborating via history-friendly flow.
-- Branch from latest `main`: `wayfinder/<ticket>-short-slug` or `feat/…` / `docs/…`.
+- Branch from latest `main`: `wayfinder/<ticket>-short-slug` or `feat/…` / `docs/…` / `fix/…`.
 - Open a **Pull Request** into `main`; link the Wayfinder issue (`Fixes #N` / `Closes #N` when the PR fully resolves it).
 - Prefer one logical decision or slice per PR so `main` history stays reviewable.
 - After merge, update that map’s **Decisions so far** in the **same session**. GitHub may auto-close a parent map when the last child closes — still edit the body.
+- Parallel PRs that both touch `src/lib.rs`, `src/commands.rs`, or `Cargo.lock`: merge **one at a time**; rebase the rest onto `main` (keep every `mod` line).
+- Implement on a **git worktree**. After merge or abandon: `git worktree remove --force <path>`, then `git branch -D`. `branch -D` fails while a worktree still holds the branch.
 
 ## Read before changing contracts
 
@@ -122,6 +126,7 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - Contract: [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md).
 - Multi-target start/stop is **not transactional**: partial failure leaves successes running (exit `1`).
 - `restart --failed` only targets Health state `error`.
+- **Two clocks:** Reconcile `START_WINDOW` (10s) classifies one observation for **status** (`starting` vs `start_timeout`). CLI `--wait-ms` (default 10s) is how long **start/restart** may poll for `running`. They are independent. Do not abort `--wait-ms` only because one poll returned Reconcile `start_timeout`.
 
 ## Config file
 
@@ -142,6 +147,18 @@ Follow the **[Zen of Python](https://peps.python.org/pep-0020/)** in Rust too. *
 
 Prefer a short named function over a clever one-liner, a generic, or a macro. Name types from [`CONTEXT.md`](./CONTEXT.md). Reviewers reject “smart” code that is hard to read.
 
+## Layers (do not confuse)
+
+| Layer | What it is | Examples |
+|-------|------------|----------|
+| `commands` | Library seam: selector, status assemble, mutate, doctor, logs | issues #42–#44 |
+| `cli` | clap argv, exits `0`–`4`, print; `main` → `cli::run()` (**no argv**) | issue #45 |
+| Layer 1 contracts | Goldens vs `schemas/*.json` (script / CI) | issue #34 |
+| Layer 2 contracts | Spawn **built binary**; validate **stdout** vs schemas | issue #47 |
+| Dogfood | Human gate on the implementation map | issue #46 |
+
+In-process serde is not Layer 2. Goldens-only is not Layer 2. Landing `commands` does not make `-h` / `status` work until `cli` exists.
+
 ## Implementation preferences
 
 - Stateless CLI; long-lived work is `cloud-sql-proxy` under `systemd --user`.
@@ -149,7 +166,7 @@ Prefer a short named function over a clever one-liner, a generic, or a macro. Na
 - v1 health = **our Unit** + local TCP accept; no Orphan adopt ([ADR 0003](./docs/adr/0003-local-health-signals.md), [`reconcile.v1.md`](./docs/reconcile.v1.md)).
 - Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)). v1 Supervisor I/O is **zbus** on the user bus ([`docs/research/supervisor-io.md`](./docs/research/supervisor-io.md)) — not `systemctl` / `systemd-run`. `logs` still uses `journalctl`.
 - Module seams: [`docs/modules.v1.md`](./docs/modules.v1.md) — clap stays in `cli`; Reconcile is pure; no traits until a second adapter exists.
-- Test / dogfood: [`docs/verification.v1.md`](./docs/verification.v1.md) — required `cargo test` list + human dogfood; implementation map inherits this; do not close [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) on golden-only.
+- Test / dogfood: [`docs/verification.v1.md`](./docs/verification.v1.md) — required `cargo test` list + human dogfood; implementation map inherits this; do not close [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) on golden-only **or** in-process serde alone.
 
 ## Wayfinder
 
@@ -164,3 +181,12 @@ Prefer a short named function over a clever one-liner, a generic, or a macro. Na
 - Must-fix → Sonnet-5 again on the same branch. Repeat until **both** reviewers and the coder are satisfied.
 - Reviewers are read-only. A human performs the squash-merge.
 - When a freeze requires tests, name the **pure fn** (do not invite a test trait).
+- Judge review comments against the **current branch tip**. Bot or stale comments may describe code that a later commit already fixed.
+
+### Bugfix (product)
+
+1. Build a **tight repro** that fails on the operator symptom (script or test). Show red before fixing.
+2. Open a **GitHub issue** (symptom, repro, expected, non-goals). Link the map when the bug is on-map.
+3. Branch `fix/…` or `wayfinder/<n>-…`; PR with `Fixes #N`.
+4. Prefer a **pure seam** regression test when the bug is policy; keep a live repro for I/O timing when needed.
+5. Use the same dual-review loop when the change is non-trivial.
