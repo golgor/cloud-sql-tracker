@@ -15,4 +15,4 @@ mod status;
 #[allow(unused_imports)]
 pub(crate) use select::{filter_failed, SelectError, Selector};
 #[allow(unused_imports)]
-pub(crate) use status::{status, StatusError};
+pub(crate) use status::{status, StatusCommandError};

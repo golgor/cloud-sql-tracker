@@ -237,8 +237,10 @@ pub(crate) enum ErrorCode {
     /// `start` only (#43) — `reconcile` never constructs this.
     #[allow(dead_code)]
     Auth,
-    /// `start` only (#43) — `reconcile` never constructs this.
-    #[allow(dead_code)]
+    /// A Connection field that only breaks at runtime, e.g. `address` is
+    /// not a valid IP (`docs/config.v1.md` only requires a non-empty
+    /// string). `commands::status` (#42) constructs this per-row instead of
+    /// failing the whole Status document.
     Config,
     /// Fallback for `start`/`doctor` (#43/#44) — `reconcile` never
     /// constructs this; its own unmapped cases already have named codes.

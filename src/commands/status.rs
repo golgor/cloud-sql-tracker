@@ -14,7 +14,10 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
-use crate::model::{self, Connection, GroupCounts, HealthState, StatusDocument, StatusRow};
+use crate::model::{
+    self, Connection, ErrorCode, GroupCounts, HealthState, Source, StatusDocument, StatusRow,
+    UnitName,
+};
 use crate::port;
 use crate::reconcile::{
     self, FailureSignal, Observation, UnitObservation, UnitResult as ReconcileUnitResult, UnitState,
@@ -27,8 +30,13 @@ use crate::supervisor::{
 use super::select::{self, SelectError, Selector};
 
 /// Why `status` could not produce a document.
+///
+/// Named `StatusCommandError` (not `StatusError`) to stay distinct from
+/// [`model::StatusError`], the Status row `error` object
+/// (`AGENTS.md`, "Writing": same word for the same thing — these are two
+/// different things that happen to share a plain-English name).
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum StatusError {
+pub(crate) enum StatusCommandError {
     #[error(transparent)]
     Select(#[from] SelectError),
     #[error("connection `{id}`: {source}")]
@@ -36,13 +44,6 @@ pub(crate) enum StatusError {
         id: String,
         #[source]
         source: model::UnitNameError,
-    },
-    #[error("connection `{id}` has an invalid address `{address}`: {source}")]
-    InvalidAddress {
-        id: String,
-        address: String,
-        #[source]
-        source: std::net::AddrParseError,
     },
     #[error("connection `{id}`: {source}")]
     Supervisor {
@@ -66,7 +67,10 @@ pub(crate) enum StatusError {
 /// `supervisor`/`port` I/O needs a live systemd user session, which
 /// `docs/verification.v1.md` does not require as a unit test).
 #[allow(dead_code)]
-pub(crate) fn status(config: &Config, selector: &Selector) -> Result<StatusDocument, StatusError> {
+pub(crate) fn status(
+    config: &Config,
+    selector: &Selector,
+) -> Result<StatusDocument, StatusCommandError> {
     let targets = select::expand(config, selector)?;
     let now = SystemTime::now();
     let mono_now_usec = monotonic_now_usec();
@@ -84,28 +88,32 @@ pub(crate) fn status(config: &Config, selector: &Selector) -> Result<StatusDocum
 }
 
 /// One Connection's full round trip: gather Observation, then classify it.
+///
+/// A Connection whose `address` does not parse as an IP degrades to its own
+/// error row instead of failing the whole document
+/// (`docs/cli-contract.v1.md`, "status": "Exit `0` even when some
+/// connections have `state: error` (errors are data)") — `docs/config.v1.md`
+/// only requires `address` to be a non-empty string, so this is a runtime
+/// possibility, not just a hypothetical.
 fn observe_and_reconcile(
     connection: &Connection,
     now: SystemTime,
     mono_now_usec: Option<u64>,
-) -> Result<StatusRow, StatusError> {
-    let unit = model::unit_name(&connection.id).map_err(|source| StatusError::UnitName {
+) -> Result<StatusRow, StatusCommandError> {
+    let unit = model::unit_name(&connection.id).map_err(|source| StatusCommandError::UnitName {
         id: connection.id.clone(),
         source,
     })?;
-    let snapshot = supervisor::show(&unit).map_err(|source| StatusError::Supervisor {
+
+    let address: IpAddr = match connection.address.parse() {
+        Ok(address) => address,
+        Err(_) => return Ok(invalid_address_row(connection, unit)),
+    };
+
+    let snapshot = supervisor::show(&unit).map_err(|source| StatusCommandError::Supervisor {
         id: connection.id.clone(),
         source: Box::new(source),
     })?;
-    let address: IpAddr =
-        connection
-            .address
-            .parse()
-            .map_err(|source| StatusError::InvalidAddress {
-                id: connection.id.clone(),
-                address: connection.address.clone(),
-                source,
-            })?;
     let port_observation = port::observe(address, connection.port);
 
     let observation = Observation {
@@ -113,6 +121,33 @@ fn observe_and_reconcile(
         port: port_observation,
     };
     Ok(reconcile::reconcile(connection, &observation, now))
+}
+
+/// A Status row for a Connection whose `address` cannot be parsed as an IP.
+/// Pure: no I/O, so `status`'s per-row degrade path is directly testable.
+fn invalid_address_row(connection: &Connection, unit: UnitName) -> StatusRow {
+    StatusRow {
+        id: connection.id.clone(),
+        name: connection.name.clone(),
+        group: connection.group.clone(),
+        instance: connection.instance.clone(),
+        address: connection.address.clone(),
+        port: connection.port,
+        private_ip: connection.private_ip,
+        state: HealthState::Error,
+        source: Source::None,
+        pid: None,
+        unit: Some(unit),
+        port_open: false,
+        uptime_sec: None,
+        error: Some(model::StatusError {
+            code: ErrorCode::Config,
+            detail: format!(
+                "connection `{}` has an invalid address `{}`",
+                connection.id, connection.address
+            ),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,15 +209,19 @@ fn map_active_state(
         UnitActiveState::Active => UnitState::Active,
         UnitActiveState::Deactivating => UnitState::Deactivating,
         UnitActiveState::Failed => UnitState::Failed(failure_signal(result, exec_outcome)),
-        UnitActiveState::Unknown(_) => UnitState::Failed(unknown_active_state_signal()),
+        UnitActiveState::Unknown(_) => UnitState::Failed(conservative_crash_signal()),
     }
 }
 
 /// A signal `reconcile::classify_failure_signal` always reads as
-/// [`FailureKind::Crashed`], never a clean stop — `exec_main_status: -1`
-/// is not a real signal number, only a sentinel that fails every clean-stop
-/// pattern (`docs/reconcile.v1.md`, "Clean stop vs failed unit").
-fn unknown_active_state_signal() -> FailureSignal {
+/// [`FailureKind::Crashed`] (`error.code: unit_failed`), never a clean stop
+/// or `exec_failed` — `exec_main_status: -1` is not a real signal number,
+/// only a sentinel that fails every pattern `classify_failure_signal`
+/// checks (`docs/reconcile.v1.md`, "Clean stop vs failed unit"). Shared by
+/// every "this adapter does not trust what systemd just reported" path: an
+/// unrecognized `ActiveState`, and a `Result=`/`ExecMainCode` pair that
+/// disagrees with itself.
+fn conservative_crash_signal() -> FailureSignal {
     FailureSignal {
         result: ReconcileUnitResult::Signal,
         exec_main_status: -1,
@@ -192,32 +231,72 @@ fn unknown_active_state_signal() -> FailureSignal {
 /// Maps `supervisor`'s already-decoded `Result=`/`ExecMainCode`/
 /// `ExecMainStatus` reading onto `reconcile::FailureSignal`'s narrower
 /// clean-stop-vs-crash vocabulary (`docs/reconcile.v1.md`, "Clean stop vs
-/// failed unit"). `exec_main_status` is `ExecOutcome`'s inner status either
-/// way — `reconcile` does not care whether it came from an exit code or a
-/// signal number, only the `(result, exec_main_status)` pair.
+/// failed unit").
+///
+/// `Result=` and `ExecMainCode` normally agree
+/// (`docs/research/supervisor-io.md`, "exit-vs-signal discriminator"): a
+/// `Result=signal`/`core-dump` Unit reports its `ExecMainStatus` as a
+/// signal number (`ExecOutcome::Signal`), and `Result=success`/`exit-code`
+/// reports it as an exit code (`ExecOutcome::ExitCode`). This function only
+/// trusts `exec_main_status`'s value when the two agree — a
+/// `Result=signal` paired with `ExecOutcome::ExitCode(15)`, for example,
+/// must never read as the clean-stop pattern `(Signal, 15)` just because
+/// `15` happened to be the number `supervisor` reported for something
+/// else entirely.
 fn failure_signal(result: SupervisorUnitResult, exec_outcome: ExecOutcome) -> FailureSignal {
-    let exec_main_status = match exec_outcome {
+    match result {
+        SupervisorUnitResult::Success => match exec_outcome {
+            ExecOutcome::ExitCode(0) => FailureSignal {
+                result: ReconcileUnitResult::Success,
+                exec_main_status: 0,
+            },
+            _ => conservative_crash_signal(),
+        },
+        SupervisorUnitResult::ExitCode => match exec_outcome {
+            ExecOutcome::ExitCode(status) => FailureSignal {
+                result: ReconcileUnitResult::ExitCode,
+                exec_main_status: status,
+            },
+            _ => conservative_crash_signal(),
+        },
+        SupervisorUnitResult::Signal => match exec_outcome {
+            ExecOutcome::Signal(status) => FailureSignal {
+                result: ReconcileUnitResult::Signal,
+                exec_main_status: status,
+            },
+            _ => conservative_crash_signal(),
+        },
+        // `classify_failure_signal` never treats `CoreDump`/`Timeout`/
+        // `ExecCondition` as a clean stop regardless of `exec_main_status`'s
+        // value, so there is no clean-stop pattern for a mismatched pair to
+        // accidentally satisfy here — the value is carried through only for
+        // `error.detail`/diagnostics.
+        SupervisorUnitResult::CoreDump => FailureSignal {
+            result: ReconcileUnitResult::CoreDump,
+            exec_main_status: exec_status_value(exec_outcome),
+        },
+        SupervisorUnitResult::Timeout => FailureSignal {
+            result: ReconcileUnitResult::Timeout,
+            exec_main_status: exec_status_value(exec_outcome),
+        },
+        SupervisorUnitResult::ExecCondition => FailureSignal {
+            result: ReconcileUnitResult::ExecCondition,
+            exec_main_status: exec_status_value(exec_outcome),
+        },
+        // An unrecognized future `Result=` value: conservative crash, the
+        // same spirit as an unrecognized `ActiveState`
+        // (`docs/research/supervisor-io.md`, "unknown future state/result
+        // string").
+        SupervisorUnitResult::Unknown(_) => conservative_crash_signal(),
+    }
+}
+
+fn exec_status_value(exec_outcome: ExecOutcome) -> i32 {
+    match exec_outcome {
         ExecOutcome::NotExited => 0,
         ExecOutcome::ExitCode(status) => status,
         ExecOutcome::Signal(status) => status,
         ExecOutcome::Unknown { status, .. } => status,
-    };
-    let result = match result {
-        SupervisorUnitResult::Success => ReconcileUnitResult::Success,
-        SupervisorUnitResult::ExitCode => ReconcileUnitResult::ExitCode,
-        SupervisorUnitResult::Signal => ReconcileUnitResult::Signal,
-        SupervisorUnitResult::Timeout => ReconcileUnitResult::Timeout,
-        SupervisorUnitResult::CoreDump => ReconcileUnitResult::CoreDump,
-        SupervisorUnitResult::ExecCondition => ReconcileUnitResult::ExecCondition,
-        // An unrecognized future `Result=` value: `Timeout` is the closest
-        // "never a clean stop" mapping in `classify_failure_signal`
-        // (`docs/research/supervisor-io.md`, "unknown future state/result
-        // string").
-        SupervisorUnitResult::Unknown(_) => ReconcileUnitResult::Timeout,
-    };
-    FailureSignal {
-        result,
-        exec_main_status,
     }
 }
 
@@ -234,16 +313,29 @@ fn started_at_from_monotonic(
     now.checked_sub(Duration::from_micros(age_usec))
 }
 
-/// A best-effort `CLOCK_MONOTONIC`-domain reading via `/proc/uptime`'s
-/// first field, in the same clock domain systemd's
-/// `ExecMainStartTimestampMonotonic` samples from. `None` degrades
-/// `started_at` to unknown — `reconcile` already treats that as outside
-/// the start window — rather than failing `status` entirely, the same
-/// best-effort spirit as `port`'s listener attribution.
+/// A `CLOCK_MONOTONIC` reading, the same clock domain systemd samples
+/// `ExecMainStartTimestampMonotonic` from
+/// (`docs/research/supervisor-io.md`, "Use monotonic start time for
+/// Reconcile"). **Not** `/proc/uptime`: that file is `CLOCK_BOOTTIME`,
+/// which keeps advancing while the machine is suspended, so on a laptop
+/// that suspends it would drift from systemd's timestamp by the total
+/// suspend time since boot and silently corrupt `uptime_sec` / the start
+/// window (`clock_gettime(2)`:
+/// <https://man7.org/linux/man-pages/man2/clock_gettime.2.html>).
+/// `clock_gettime` is the Linux syscall that reads a kernel clock; `rustix`
+/// wraps it as a safe, allocation-free function.
+///
+/// `None` degrades `started_at` to unknown — `reconcile` already treats
+/// that as outside the start window — rather than failing `status`
+/// entirely, the same best-effort spirit as `port`'s listener attribution.
+/// In practice this is always `Some` on Linux: `rustix::time::clock_gettime`
+/// is infallible for `ClockId::Monotonic`, and the `Option` here only
+/// guards the `i64` -> `u64` conversion.
 fn monotonic_now_usec() -> Option<u64> {
-    let raw = std::fs::read_to_string("/proc/uptime").ok()?;
-    let seconds: f64 = raw.split_whitespace().next()?.parse().ok()?;
-    Some((seconds * 1_000_000.0) as u64)
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let sec_usec = u64::try_from(now.tv_sec).ok()?.checked_mul(1_000_000)?;
+    let nsec_usec = u64::try_from(now.tv_nsec).ok()? / 1_000;
+    sec_usec.checked_add(nsec_usec)
 }
 
 // ---------------------------------------------------------------------------
@@ -254,11 +346,7 @@ fn monotonic_now_usec() -> Option<u64> {
 /// already-reconciled rows (`docs/status-document.v1.md`, "Top-level
 /// object"). Pure: `now` and `cli_version` are explicit inputs so this is
 /// testable without a real clock or `CARGO_PKG_VERSION`.
-pub(crate) fn assemble_document(
-    rows: Vec<StatusRow>,
-    now: SystemTime,
-    cli_version: String,
-) -> StatusDocument {
+fn assemble_document(rows: Vec<StatusRow>, now: SystemTime, cli_version: String) -> StatusDocument {
     let mut groups: BTreeMap<String, GroupCounts> = BTreeMap::new();
     let mut totals = GroupCounts::default();
     for row in &rows {
@@ -331,7 +419,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ErrorCode, Source};
 
     // -- map_unit_snapshot ---------------------------------------------------
 
@@ -406,9 +493,9 @@ mod tests {
 
     #[test]
     fn map_unit_snapshot_missing_monotonic_now_leaves_started_at_unknown() {
-        // `monotonic_now_usec` can fail to read `/proc/uptime`; a Unit that
-        // does report a start time must still degrade to `None`, not panic
-        // or silently look "just started".
+        // `monotonic_now_usec` can fail to read `CLOCK_MONOTONIC`; a Unit
+        // that does report a start time must still degrade to `None`, not
+        // panic or silently look "just started".
         let snapshot = UnitSnapshot::Loaded {
             active_state: UnitActiveState::Active,
             sub_state: "running".to_string(),
@@ -452,7 +539,169 @@ mod tests {
         let UnitState::Failed(signal) = observation.state else {
             panic!("expected a Failed state");
         };
-        assert_eq!(signal.result, ReconcileUnitResult::Timeout);
+        assert_eq!(signal, conservative_crash_signal());
+    }
+
+    // -- map_active_state: every branch, not just Failed/Unknown -----------
+
+    #[test]
+    fn map_active_state_inactive_is_idle() {
+        let state = map_active_state(
+            UnitActiveState::Inactive,
+            SupervisorUnitResult::Success,
+            ExecOutcome::NotExited,
+        );
+        assert_eq!(state, UnitState::Idle);
+    }
+
+    #[test]
+    fn map_active_state_activating_is_activating() {
+        let state = map_active_state(
+            UnitActiveState::Activating,
+            SupervisorUnitResult::Success,
+            ExecOutcome::NotExited,
+        );
+        assert_eq!(state, UnitState::Activating);
+    }
+
+    #[test]
+    fn map_active_state_deactivating_is_deactivating() {
+        let state = map_active_state(
+            UnitActiveState::Deactivating,
+            SupervisorUnitResult::Success,
+            ExecOutcome::NotExited,
+        );
+        assert_eq!(state, UnitState::Deactivating);
+    }
+
+    // -- failure_signal: Result=/ExecMainCode agreement ---------------------
+
+    #[test]
+    fn failure_signal_signal_result_with_matching_signal_outcome_is_trusted() {
+        let signal = failure_signal(SupervisorUnitResult::Signal, ExecOutcome::Signal(15));
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::Signal,
+                exec_main_status: 15,
+            }
+        );
+    }
+
+    #[test]
+    fn failure_signal_exit_code_result_with_matching_exit_code_outcome_is_trusted() {
+        let signal = failure_signal(SupervisorUnitResult::ExitCode, ExecOutcome::ExitCode(0));
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::ExitCode,
+                exec_main_status: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn failure_signal_exit_code_result_with_a_clean_stop_status_143_is_trusted() {
+        let signal = failure_signal(SupervisorUnitResult::ExitCode, ExecOutcome::ExitCode(143));
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::ExitCode,
+                exec_main_status: 143,
+            }
+        );
+    }
+
+    #[test]
+    fn failure_signal_success_result_with_exit_zero_is_trusted() {
+        let signal = failure_signal(SupervisorUnitResult::Success, ExecOutcome::ExitCode(0));
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::Success,
+                exec_main_status: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn failure_signal_signal_result_with_a_mismatched_exit_code_outcome_never_reads_as_clean() {
+        // `Result=signal` paired with `ExecOutcome::ExitCode(15)` (not
+        // `ExecOutcome::Signal(15)`) is the exact malformed pair a reviewer
+        // flagged: naively reusing `15` here would satisfy
+        // `classify_failure_signal`'s `(Signal, 15)` clean-stop pattern for
+        // the wrong reason.
+        let signal = failure_signal(SupervisorUnitResult::Signal, ExecOutcome::ExitCode(15));
+        assert_eq!(signal, conservative_crash_signal());
+    }
+
+    #[test]
+    fn failure_signal_exit_code_result_with_not_exited_never_reads_as_clean() {
+        // `Result=exit-code` paired with `ExecOutcome::NotExited` (status
+        // defaults to `0`) must not satisfy the `(ExitCode, 0)` clean-stop
+        // pattern — there was no real exit code to read.
+        let signal = failure_signal(SupervisorUnitResult::ExitCode, ExecOutcome::NotExited);
+        assert_eq!(signal, conservative_crash_signal());
+    }
+
+    #[test]
+    fn failure_signal_success_result_with_a_mismatched_signal_outcome_never_reads_as_clean() {
+        let signal = failure_signal(SupervisorUnitResult::Success, ExecOutcome::Signal(9));
+        assert_eq!(signal, conservative_crash_signal());
+    }
+
+    #[test]
+    fn failure_signal_unknown_exec_outcome_is_conservative_for_every_result() {
+        let signal = failure_signal(
+            SupervisorUnitResult::ExitCode,
+            ExecOutcome::Unknown { code: 4, status: 0 },
+        );
+        assert_eq!(signal, conservative_crash_signal());
+    }
+
+    #[test]
+    fn failure_signal_core_dump_result_is_always_crash_regardless_of_status() {
+        // `classify_failure_signal` has no clean-stop pattern for
+        // `CoreDump`, so the exact status value carried through does not
+        // change the outcome — covered here for completeness of the
+        // `Result=` match.
+        let signal = failure_signal(SupervisorUnitResult::CoreDump, ExecOutcome::Signal(6));
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::CoreDump,
+                exec_main_status: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn failure_signal_exec_condition_result_carries_its_status_through() {
+        let signal = failure_signal(
+            SupervisorUnitResult::ExecCondition,
+            ExecOutcome::ExitCode(1),
+        );
+        assert_eq!(
+            signal,
+            FailureSignal {
+                result: ReconcileUnitResult::ExecCondition,
+                exec_main_status: 1,
+            }
+        );
+    }
+
+    // -- monotonic_now_usec ---------------------------------------------------
+
+    #[test]
+    fn monotonic_now_usec_reads_clock_monotonic_successfully() {
+        // Infallible on Linux; this is a sanity check that the syscall
+        // wiring and unit conversion do not panic or return `None` on the
+        // platform this crate targets.
+        let usec = monotonic_now_usec().expect("CLOCK_MONOTONIC should be available on Linux");
+        assert!(
+            usec > 0,
+            "a booted machine's CLOCK_MONOTONIC reading is never zero"
+        );
     }
 
     // -- started_at_from_monotonic --------------------------------------------
@@ -576,17 +825,27 @@ mod tests {
     // -- StatusDocument vs schemas/status.v1.json (shape proof only; does
     // not close #23 — `docs/verification.v1.md`, "Status / Doctor JSON") ---
 
-    #[test]
-    fn status_document_serializes_to_the_status_v1_schema_shape() {
-        let rows = vec![
-            row("backend-dev", "backend", HealthState::Running),
-            row("fe-dev", "fe", HealthState::Error),
-        ];
-        let doc = assemble_document(rows, now(), "0.1.0".to_string());
-        let instance = serde_json::to_value(&doc).expect("StatusDocument serializes");
+    fn connection(id: &str, group: &str, port: u16) -> Connection {
+        Connection {
+            id: id.to_string(),
+            name: id.to_string(),
+            group: group.to_string(),
+            instance: "proj:region:inst".to_string(),
+            address: "127.0.0.1".to_string(),
+            port,
+            private_ip: false,
+            auto_iam_authn: false,
+            extra_args: Vec::new(),
+            enabled: true,
+        }
+    }
 
-        let schema_text =
-            std::fs::read_to_string("schemas/status.v1.json").expect("read the status schema");
+    fn validate_against_status_schema(doc: &StatusDocument) {
+        let instance = serde_json::to_value(doc).expect("StatusDocument serializes");
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/status.v1.json");
+        let schema_text = std::fs::read_to_string(schema_path).expect("read the status schema");
         let schema: serde_json::Value =
             serde_json::from_str(&schema_text).expect("parse the status schema");
         let validator = jsonschema::validator_for(&schema).expect("compile the status schema");
@@ -600,5 +859,90 @@ mod tests {
             "status document rejected by schemas/status.v1.json:\n{}",
             errors.join("\n")
         );
+    }
+
+    /// Proves the whole pure pipeline this ticket (#42) adds —
+    /// `Observation` -> `reconcile::reconcile` -> `assemble_document` ->
+    /// serde -- not just `StatusDocument`'s own serde attributes
+    /// (`docs/verification.v1.md`, "Status / Doctor JSON": "Construct
+    /// **Observation** in-process"). Still in-process: this does not close
+    /// #23 (real `status --json` stdout).
+    #[test]
+    fn status_document_built_through_reconcile_serializes_to_the_status_v1_schema_shape() {
+        use crate::model::{PortObservation, PortProbe};
+
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+
+        let running = connection("backend-dev", "backend", 15432);
+        let running_row = reconcile::reconcile(
+            &running,
+            &Observation {
+                unit: UnitObservation {
+                    state: UnitState::Active,
+                    main_pid: Some(4242),
+                    started_at: Some(now - Duration::from_secs(3_600)),
+                },
+                port: PortObservation {
+                    probe: PortProbe::Open,
+                    listener_pid: Some(4242),
+                    listener_name: Some("cloud-sql-proxy".to_string()),
+                },
+            },
+            now,
+        );
+        assert_eq!(running_row.state, HealthState::Running);
+
+        let failed = connection("fe-dev", "fe", 15434);
+        let failed_row = reconcile::reconcile(
+            &failed,
+            &Observation {
+                unit: UnitObservation {
+                    state: UnitState::Failed(FailureSignal {
+                        result: ReconcileUnitResult::Signal,
+                        exec_main_status: 9,
+                    }),
+                    main_pid: Some(4243),
+                    started_at: None,
+                },
+                port: PortObservation {
+                    probe: PortProbe::Closed,
+                    listener_pid: None,
+                    listener_name: None,
+                },
+            },
+            now,
+        );
+        assert_eq!(failed_row.state, HealthState::Error);
+
+        let doc = assemble_document(vec![running_row, failed_row], now, "0.1.0".to_string());
+        validate_against_status_schema(&doc);
+    }
+
+    // -- invalid_address_row (must produce a document, never fail it) ------
+
+    #[test]
+    fn invalid_address_row_is_a_config_error_row() {
+        let target = connection("bad-address", "fe", 15432);
+        let unit = model::unit_name(&target.id).expect("a valid test id");
+        let row = invalid_address_row(&target, unit.clone());
+
+        assert_eq!(row.id, "bad-address");
+        assert_eq!(row.state, HealthState::Error);
+        assert_eq!(row.source, Source::None);
+        assert_eq!(row.pid, None);
+        assert_eq!(row.unit, Some(unit));
+        assert!(!row.port_open);
+        assert_eq!(row.uptime_sec, None);
+        let error = row.error.expect("an invalid address is a Config error");
+        assert_eq!(error.code, ErrorCode::Config);
+    }
+
+    #[test]
+    fn invalid_address_row_still_validates_against_the_status_v1_schema() {
+        let target = connection("bad-address", "fe", 15432);
+        let unit = model::unit_name(&target.id).expect("a valid test id");
+        let row = invalid_address_row(&target, unit);
+        let doc = assemble_document(vec![row], now(), "0.1.0".to_string());
+        validate_against_status_schema(&doc);
     }
 }
