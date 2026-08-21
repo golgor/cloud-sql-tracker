@@ -28,17 +28,43 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`docs/doctor.v1.md`](./docs/doctor.v1.md) | **Doctor** preflight checks + `doctor --json` |
 | [`schemas/doctor.v1.json`](./schemas/doctor.v1.json) | Machine-readable Doctor report schema |
 | [`examples/doctor.v1.json`](./examples/doctor.v1.json) | Golden doctor snapshot |
+| [`docs/logs.v1.md`](./docs/logs.v1.md) | **`logs` subcommand** (journalctl dump UX) |
+| [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
 | [`docs/research/`](./docs/research/) | systemd / port / journal research |
+
+## Contract artifacts (keep in sync)
+
+Frozen product surfaces use a small artifact set. **Same PR** must update every applicable piece — never prose-only or schema-only drift.
+
+| Kind | When | Artifacts |
+|------|------|-----------|
+| **JSON contract** | Machine JSON in or out (`status --json`, `doctor --json`, `connections.json`) | **Prose** (`docs/…v1.md`) + **JSON Schema** (`schemas/…`) + **golden example** (`examples/…json`) |
+| **Plain-text / argv UX** | Human stdout or argv-only (`logs`, much of CLI contract) | **Prose** + **golden sample** when useful (e.g. `examples/logs.v1.txt`) — **no** JSON Schema |
+| **Rules / tables** | Pure decision tables (`reconcile`) | **Prose** (normative tables); schema only if a JSON document is defined |
+
+### Current JSON trios
+
+| Prose | Schema | Golden |
+|-------|--------|--------|
+| [`docs/status-document.v1.md`](./docs/status-document.v1.md) | [`schemas/status.v1.json`](./schemas/status.v1.json) | [`examples/status.v1.json`](./examples/status.v1.json) |
+| [`docs/config.v1.md`](./docs/config.v1.md) | [`schemas/config.v1.json`](./schemas/config.v1.json) | [`examples/connections.json`](./examples/connections.json) |
+| [`docs/doctor.v1.md`](./docs/doctor.v1.md) | [`schemas/doctor.v1.json`](./schemas/doctor.v1.json) | [`examples/doctor.v1.json`](./examples/doctor.v1.json) |
+
+### Rules
+
+- Touching a JSON field, enum, or validation rule → update **prose + schema + golden** together.
+- Prefer **additive** optional fields; bump document schema `version` only for breaking shape/meaning changes (see each prose doc).
+- New JSON contracts must add the full trio and a row in the table above.
+- CI: goldens must validate against schemas **and**, once the binary exists, CLI JSON (`status --json`, `doctor --json`) and config parse must match those schemas — [issue #23](https://github.com/golgor/cloud-sql-tracker/issues/23). Do not close #23 on golden-only checks.
 
 ## Status document (critical)
 
 - **Only** `cloud-sql-tracker status --json` produces the Status document.
 - Schema id is integer field `version` (currently `1`). Binary semver is `cli_version`.
-- There is **no `list` command** in v1; do not invent a parallel status JSON. Plugin consumes **status only**.
-- Prefer **additive** optional fields; bump schema `version` only for breaking shape/meaning changes.
-- When you touch status fields: update **prose + JSON Schema + golden example** together in the same PR.
+- There is **no `list` command** in v1; do not invent a parallel status JSON. Plugin consumes **status only** (not `logs`, not doctor as bar state).
+- Field meanings: [`docs/status-document.v1.md`](./docs/status-document.v1.md). Sync rule: **Contract artifacts** above.
 
-If a JSON field is unclear, **open `docs/status-document.v1.md`** — that file exists specifically so agents and humans are not left guessing from a bare example.
+If a JSON field is unclear, **open the status prose** — do not guess from the golden alone.
 
 ## Version string (single source)
 
@@ -57,7 +83,7 @@ If a JSON field is unclear, **open `docs/status-document.v1.md`** — that file 
 - Contract: [`docs/config.v1.md`](./docs/config.v1.md).
 - **Reject unknown JSON keys** (exit 2). Do not “ignore extras.”
 - Unique `id`, `port`, and `instance`. Reserved ports: 5432, 3306, 1433 (+ all 1–1023).
-- When changing config rules: update **prose + JSON Schema + golden example** in the same PR.
+- Sync rule: **Contract artifacts** (prose + schema + golden).
 
 ## Implementation preferences
 

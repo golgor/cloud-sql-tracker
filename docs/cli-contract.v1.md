@@ -160,11 +160,13 @@ cloud-sql-tracker logs <ID> [--lines N]
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--lines N` | `100` | Journal line count |
+| `--lines N` | `100` | Journal line count (integer ≥ 1) |
 
 - Single id only (no `--group` / `--all` in v1).
-- No `--follow` in v1.
-- Stdout: plain journal text (see `docs/research/journalctl-logs.md`).
+- No `--follow` in v1. No `--json` on `logs` (plugin uses `status` / `doctor` JSON only).
+- Stdout: plain journal text via `journalctl --user` (see [`logs.v1.md`](./logs.v1.md)).
+- Empty journal → exit `0` + short **stderr** hint (stdout empty). Missing `journalctl` / unusable user journal → exit `3`. Same `0`/`2`/`3` family as the [exit code table](#exit-code-table).
+- Full behavior, argv template, exit codes: [`docs/logs.v1.md`](./logs.v1.md). Sample transcript: [`examples/logs.v1.txt`](../examples/logs.v1.txt).
 
 ### `doctor`
 
@@ -192,11 +194,11 @@ cloud-sql-tracker doctor [--json]
 
 | Code | Name | When |
 |------|------|------|
-| `0` | Success | All requested work succeeded, including idempotent no-ops. `status` produced a document. `restart --failed` with zero matches. |
-| `1` | Partial failure | Multi-target batch: **at least one** target succeeded and **at least one** failed. Survivors keep their new state. |
-| `2` | Usage / config | Bad argv, missing/invalid config file, unknown id/group, mutual exclusion violation. |
-| `3` | Dependency | Cannot operate: e.g. no systemd user bus, proxy binary unresolved when required for the whole command. Prefer `3` when failure is environmental rather than per-id. |
-| `4` | Total failure | Every target in the batch failed, **or** a single-id mutating command failed after attempting the operation. |
+| `0` | Success | All requested work succeeded, including idempotent no-ops. `status` produced a document. `restart --failed` with zero matches. `logs` with journalctl success (including **empty** journal). |
+| `1` | Partial failure | Multi-target batch: **at least one** target succeeded and **at least one** failed. Survivors keep their new state. **Not used by `logs`** (single-id only). |
+| `2` | Usage / config | Bad argv, missing/invalid config file, unknown id/group, mutual exclusion violation, invalid `--lines`. |
+| `3` | Dependency | Cannot operate: e.g. no systemd user bus, proxy binary unresolved when required for the whole command, **`journalctl` missing or user journal unusable** (`logs`). Prefer `3` when failure is environmental rather than per-id. |
+| `4` | Total failure | Every target in the batch failed, **or** a single-id mutating command failed after attempting the operation. **Not used by `logs`** (empty journal is `0`; journal access problems are `3`). |
 
 #### Examples
 
@@ -210,6 +212,9 @@ cloud-sql-tracker doctor [--json]
 | `start nope` unknown id | `2` |
 | `status --json` with 2 connections in error | `0` |
 | `start --all` but no user systemd | `3` |
+| `logs fe-dev` with lines or empty journal | `0` |
+| `logs nope` unknown id / `--lines 0` | `2` |
+| `logs fe-dev` but `journalctl` missing / user journal unusable | `3` |
 
 ### Stdio conventions
 

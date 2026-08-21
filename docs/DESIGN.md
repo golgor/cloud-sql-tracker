@@ -119,7 +119,7 @@ cloud-sql-tracker [--config PATH] status [--json] [id | --group G | --all]
 cloud-sql-tracker start    [--wait-ms N] <id | --group G | --all>
 cloud-sql-tracker stop     [--wait-ms N] <id | --group G | --all>
 cloud-sql-tracker restart  [--wait-ms N] [--failed] <id | --group G | --all>
-cloud-sql-tracker logs     <id> [--lines N]
+cloud-sql-tracker logs     <id> [--lines N]   # see docs/logs.v1.md
 cloud-sql-tracker doctor   [--json]
 cloud-sql-tracker --version   # bare semver from Cargo.toml only
 ```
@@ -138,7 +138,7 @@ cloud-sql-tracker --version   # bare semver from Cargo.toml only
 - Plugin writing config files directly
 - Alternate Google auth to ADC (keys-in-config, impersonation UX, etc.)
 - Proxy HTTP `--health-check` / admin ports as part of Health state (deferred research)
-- `logs --follow` streaming (dump-only first; see research brief)
+- `logs --follow` streaming (v1 dump-only; [`logs.v1.md`](./logs.v1.md))
 
 ## Build slices
 
@@ -154,4 +154,4 @@ cloud-sql-tracker --version   # bare semver from Cargo.toml only
 |------|------|
 | Config | `~/.config/cloud-sql-tracker/connections.json` |
 | Runtime locks | `$XDG_RUNTIME_DIR/cloud-sql-tracker/` |
-| Optional file logs | `~/.local/state/cloud-sql-tracker/logs/` (prefer journald) |
+| Optional file logs | Not in v1 — journald only ([`logs.v1.md`](./logs.v1.md)) |
