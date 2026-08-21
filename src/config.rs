@@ -39,6 +39,8 @@ pub(crate) enum ConfigError {
     Json(#[from] serde_json::Error),
     #[error("config version {found} is not supported (expected 1)")]
     UnsupportedVersion { found: i64 },
+    #[error("proxy_bin must not be empty")]
+    EmptyProxyBin,
     #[error("connection `{id}`: {reason}")]
     InvalidConnection { id: String, reason: String },
     #[error("duplicate connection id `{0}`")]
@@ -78,11 +80,20 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Config, ConfigError> {
     check_uniqueness(&connections)?;
 
     Ok(Config {
-        proxy_bin: raw
-            .proxy_bin
-            .unwrap_or_else(|| DEFAULT_PROXY_BIN.to_string()),
+        proxy_bin: validate_proxy_bin(raw.proxy_bin)?,
         connections,
     })
+}
+
+/// `schemas/config.v1.json` `proxy_bin`: `minLength: 1`. Absent falls back
+/// to [`DEFAULT_PROXY_BIN`]; present-but-empty is a validation error, not a
+/// silent default.
+fn validate_proxy_bin(proxy_bin: Option<String>) -> Result<String, ConfigError> {
+    match proxy_bin {
+        None => Ok(DEFAULT_PROXY_BIN.to_string()),
+        Some(bin) if bin.is_empty() => Err(ConfigError::EmptyProxyBin),
+        Some(bin) => Ok(bin),
+    }
 }
 
 /// `$XDG_CONFIG_HOME/cloud-sql-tracker/connections.json`, else
@@ -119,9 +130,8 @@ pub(crate) fn by_id<'a>(config: &'a Config, id: &str) -> Option<&'a Connection> 
         .find(|connection| connection.id == id)
 }
 
-/// Raw shapes mirroring `schemas/config.v1.json`. `Option` fields may be
-/// filled by [`RawDefaults`] during merge; unknown keys are rejected at
-/// every level (`docs/config.v1.md`, "Strict keys").
+/// Raw shapes mirroring `schemas/config.v1.json`. Unknown keys are
+/// rejected at every level (`docs/config.v1.md`, "Strict keys").
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -131,13 +141,13 @@ struct RawConfig {
     connections: Vec<RawConnection>,
 }
 
+/// Optional fields only. `schemas/config.v1.json` `connectionObject`
+/// requires `id`/`name`/`group`/`instance`/`port` on every connection, so
+/// those identity fields cannot come from here — only from [`RawConnection`]
+/// (`docs/modules.v1.md`, "config — deep validation").
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawDefaults {
-    name: Option<String>,
-    group: Option<String>,
-    instance: Option<String>,
-    port: Option<u16>,
     address: Option<String>,
     private_ip: Option<bool>,
     auto_iam_authn: Option<bool>,
@@ -149,10 +159,10 @@ struct RawDefaults {
 #[serde(deny_unknown_fields)]
 struct RawConnection {
     id: String,
-    name: Option<String>,
-    group: Option<String>,
-    instance: Option<String>,
-    port: Option<u16>,
+    name: String,
+    group: String,
+    instance: String,
+    port: u16,
     address: Option<String>,
     private_ip: Option<bool>,
     auto_iam_authn: Option<bool>,
@@ -162,40 +172,24 @@ struct RawConnection {
 
 /// Built-in defaults (`docs/config.v1.md`, "Built-in defaults") layered
 /// under file `defaults`, then the connection object (`docs/config.v1.md`,
-/// "Merge order").
+/// "Merge order"). Identity fields (`name`/`group`/`instance`/`port`) are
+/// already required directly on `raw`; only the optional fields merge.
 fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connection, ConfigError> {
     let id = raw.id;
     validate_id(&id).map_err(|reason| invalid(&id, reason))?;
-
-    let name = raw
-        .name
-        .or_else(|| defaults.name.clone())
-        .ok_or_else(|| missing(&id, "name"))?;
-    let group = raw
-        .group
-        .or_else(|| defaults.group.clone())
-        .ok_or_else(|| missing(&id, "group"))?;
-    let instance = raw
-        .instance
-        .or_else(|| defaults.instance.clone())
-        .ok_or_else(|| missing(&id, "instance"))?;
-    validate_instance(&instance).map_err(|reason| invalid(&id, reason))?;
-    let port = raw
-        .port
-        .or(defaults.port)
-        .ok_or_else(|| missing(&id, "port"))?;
-    validate_port(port).map_err(|reason| invalid(&id, reason))?;
+    validate_instance(&raw.instance).map_err(|reason| invalid(&id, reason))?;
+    validate_port(raw.port).map_err(|reason| invalid(&id, reason))?;
 
     Ok(Connection {
         id,
-        name,
-        group,
-        instance,
+        name: raw.name,
+        group: raw.group,
+        instance: raw.instance,
         address: raw
             .address
             .or_else(|| defaults.address.clone())
             .unwrap_or_else(|| DEFAULT_ADDRESS.to_string()),
-        port,
+        port: raw.port,
         private_ip: raw.private_ip.or(defaults.private_ip).unwrap_or(false),
         auto_iam_authn: raw
             .auto_iam_authn
@@ -207,10 +201,6 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connec
             .unwrap_or_default(),
         enabled: raw.enabled.or(defaults.enabled).unwrap_or(true),
     })
-}
-
-fn missing(id: &str, field: &str) -> ConfigError {
-    invalid(id, format!("missing required field `{field}`"))
 }
 
 fn invalid(id: &str, reason: impl Into<String>) -> ConfigError {
@@ -434,16 +424,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_a_missing_required_field_with_no_default() {
+    fn parse_rejects_a_connection_missing_a_required_identity_field() {
         let json = r#"{
             "version": 1,
             "connections": [
                 {"id": "a", "name": "A", "group": "g", "port": 15432}
             ]
         }"#;
+        let err = parse(json.as_bytes()).expect_err("a connection missing `instance` must reject");
+        assert!(matches!(err, ConfigError::Json(_)));
+    }
+
+    #[test]
+    fn parse_rejects_a_connection_missing_its_own_group() {
+        let json = r#"{
+            "version": 1,
+            "connections": [
+                {"id": "a", "name": "A", "instance": "p:r:i1", "port": 15432}
+            ]
+        }"#;
         let err = parse(json.as_bytes())
-            .expect_err("a connection with no instance and no default must reject");
-        assert!(matches!(err, ConfigError::InvalidConnection { .. }));
+            .expect_err("group is required on every connection, per schemas/config.v1.json");
+        assert!(matches!(err, ConfigError::Json(_)));
+    }
+
+    #[test]
+    fn parse_rejects_group_supplied_only_via_defaults() {
+        let json = r#"{
+            "version": 1,
+            "defaults": {"group": "shared"},
+            "connections": []
+        }"#;
+        let err =
+            parse(json.as_bytes()).expect_err("group belongs on each connection, not defaults");
+        assert!(matches!(err, ConfigError::Json(_)));
     }
 
     #[test]
@@ -509,21 +523,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_lets_file_defaults_supply_a_shared_group() {
-        let json = r#"{
-            "version": 1,
-            "defaults": {"group": "shared"},
-            "connections": [
-                {"id": "a", "name": "A", "instance": "p:r:i1", "port": 15432},
-                {"id": "b", "name": "B", "instance": "p:r:i2", "port": 15433}
-            ]
-        }"#;
-        let config = parse(json.as_bytes()).expect("group can come from defaults");
-        assert_eq!(config.connections[0].group, "shared");
-        assert_eq!(config.connections[1].group, "shared");
-    }
-
-    #[test]
     fn parse_defaults_proxy_bin_when_absent() {
         let json = r#"{"version": 1, "connections": []}"#;
         let config = parse(json.as_bytes()).expect("empty inventory is valid");
@@ -535,6 +534,13 @@ mod tests {
         let json = r#"{"version": 1, "proxy_bin": "/opt/bin/cloud-sql-proxy", "connections": []}"#;
         let config = parse(json.as_bytes()).expect("explicit proxy_bin is honored");
         assert_eq!(config.proxy_bin, "/opt/bin/cloud-sql-proxy");
+    }
+
+    #[test]
+    fn parse_rejects_an_empty_proxy_bin() {
+        let json = r#"{"version": 1, "proxy_bin": "", "connections": []}"#;
+        let err = parse(json.as_bytes()).expect_err("an empty proxy_bin must reject");
+        assert_eq!(err.to_string(), "proxy_bin must not be empty");
     }
 
     #[test]
