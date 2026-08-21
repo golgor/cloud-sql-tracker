@@ -2,6 +2,25 @@
 
 This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy processes. The Omarchy bar plugin is a **separate** repo: `cloud-sql-tracker-oma-plugin`.
 
+## Writing (chat, issues, docs, PR comments)
+
+Use terms from [`CONTEXT.md`](./CONTEXT.md). Write in **ASD-STE100 Simplified Technical English**:
+
+- Use short sentences. Put one idea in each sentence.
+- Use the same word for the same thing.
+- Use active voice. Do not use slang or idioms.
+
+When you state a **choice**, use this order:
+
+1. **Pick** — what we use.
+2. **Why** — one reason.
+3. **Discarded** — what we do not use, and why (one line).
+4. **Unchanged** — what this choice does not change.
+
+Start with the Pick. A discard-first gist hid “we use mise” in the implementation-map research.
+
+**Research briefs** live in [`docs/research/`](./docs/research/). They are human prose. Do not put subagent `acceptance-report` JSON or `/tmp` paths in them. Crate and toolchain numbers in a brief are **snapshots**. Pin the version on the implement ticket. Put a **gist + file path** on that ticket. Do not point only at a closed GitHub issue.
+
 ## Git workflow (PRs)
 
 - Do **not** commit product/docs freezes straight to `main` when collaborating via history-friendly flow.
@@ -32,7 +51,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
 | [`docs/modules.v1.md`](./docs/modules.v1.md) | **Rust module seams** (`src/` layout, pure vs I/O) |
 | [`docs/verification.v1.md`](./docs/verification.v1.md) | **Test + dogfood strategy** (cargo bar, human gate, next map) |
-| [`docs/research/`](./docs/research/) | systemd / port / journal research |
+| [`docs/research/`](./docs/research/) | Adapter I/O, CI/dev-loop, crates. **Read the matching brief** before that implement ticket. |
 
 ## Contract artifacts (keep in sync)
 
@@ -98,7 +117,7 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 
 ## Wayfinder
 
-- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) is **closed**. Implementation is a **new map** (`/wayfinder`). Do not reopen #2 as parent.
+- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) is **closed**. Implementation map is [#28](https://github.com/golgor/cloud-sql-tracker/issues/28). Do not reopen #2 as parent.
 - Planning decisions live on GitHub issues (map label `wayfinder:map`). Do not re-litigate closed tickets without an explicit reopen.
 - **One map, one job.** Spec freeze ≠ cargo-test-green. Proof lives on the implementation map ([`docs/verification.v1.md`](./docs/verification.v1.md)).
 
