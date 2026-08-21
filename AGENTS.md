@@ -55,7 +55,7 @@ Frozen product surfaces use a small artifact set. **Same PR** must update every 
 - Touching a JSON field, enum, or validation rule → update **prose + schema + golden** together.
 - Prefer **additive** optional fields; bump document schema `version` only for breaking shape/meaning changes (see each prose doc).
 - New JSON contracts must add the full trio and a row in the table above.
-- CI should eventually fail PRs when a golden no longer validates against its schema (tracked separately until a workflow exists).
+- CI: goldens must validate against schemas **and**, once the binary exists, CLI JSON (`status --json`, `doctor --json`) and config parse must match those schemas — [issue #23](https://github.com/golgor/cloud-sql-tracker/issues/23). Do not close #23 on golden-only checks.
 
 ## Status document (critical)
 
