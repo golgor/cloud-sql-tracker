@@ -157,9 +157,9 @@ Stretch (later maps): `--follow`, `--since`, alternate `-o` formats.
 
 ## Implementer checklist (non-normative)
 
-1. Resolve config + id → unit name; build argv as above.  
-2. `Command::new("journalctl")` (or absolute); clear env only if needed — usually inherit.  
-3. Empty-line hint on stderr; exit 0.  
-4. Missing `journalctl` → exit 3 + doctor hint.  
+1. Resolve config + id → unit name; build argv including `--quiet`.  
+2. `Command::new("journalctl")` (or absolute); capture stdout.  
+3. Empty stdout → hint on stderr, exit 0; else write bytes to stdout, no hint.  
+4. Missing `journalctl` / journal unusable → exit 3 + doctor hint.  
 5. Integration smoke on Omarchy: start one unit, `logs`, stop, `logs` still works.  
 6. No JSON schema for this command.
