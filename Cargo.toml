@@ -15,6 +15,7 @@ procfs = { version = "0.18", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+zbus = "5.19.0"
 # clap lands with cli (#45).
 
 [profile.release]
