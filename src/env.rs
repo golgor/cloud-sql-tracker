@@ -4,14 +4,10 @@
 //! (`docs/modules.v1.md`, "env — proxy binary + ADC"; ADC is a hard
 //! requirement, [ADR 0002](../docs/adr/0002-adc-only-auth.md)).
 //!
-//! This ticket ([#38](https://github.com/golgor/cloud-sql-tracker/issues/38))
-//! lands the adapter ahead of its callers: `commands::doctor` (#44) for the
-//! `*_check` rows, and `commands::start` (#43) for `resolve_proxy_bin` /
-//! `adc_status` directly. Until those land, nothing outside this module's
-//! own tests calls these `pub(crate)` functions, so `rustc`/clippy see them
-//! as dead code under `-D warnings`. Remove this `allow` once a caller
+//! `commands::doctor` (#44) calls the `*_check` rows below.
+//! `resolve_proxy_bin` / `adc_status` themselves are still only reachable
+//! from mutate (#43) and stay individually `#[allow(dead_code)]` until it
 //! lands.
-#![allow(dead_code)]
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -26,7 +22,8 @@ const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
 /// `configured` is the connections file's top-level `proxy_bin` value, or
 /// `None` to use the built-in default name. An absolute path must be an
 /// executable file; a bare name is searched on `PATH` the same way a shell
-/// would.
+/// would. Mutate (#43) will call this directly for **start**'s env
+/// forwarding; [`proxy_bin_check`] below already makes it reachable.
 pub(crate) fn resolve_proxy_bin(configured: Option<&str>) -> Result<PathBuf, ProxyBinError> {
     let name = configured.unwrap_or(DEFAULT_PROXY_BIN);
     let path_env = std::env::var_os("PATH").unwrap_or_default();
@@ -153,6 +150,8 @@ pub(crate) struct AdcStatus {
 
 /// Read `GOOGLE_APPLICATION_CREDENTIALS` and `HOME` from the process
 /// environment and resolve ADC presence, for **start**'s env forwarding.
+/// Mutate (#43) will call this directly; [`adc_check`] below already
+/// makes it reachable.
 pub(crate) fn adc_status() -> AdcStatus {
     let gac_env = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").map(PathBuf::from);
     let home = std::env::var_os("HOME").map(PathBuf::from);

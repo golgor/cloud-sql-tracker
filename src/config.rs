@@ -53,9 +53,9 @@ pub(crate) enum ConfigError {
 
 /// Read `path` then [`parse`] its bytes.
 ///
-/// Used by `commands`/`cli` (#42+); exercised directly by this module's
-/// tests until then.
-#[allow(dead_code)]
+/// `commands::doctor` (#44) calls this directly (its own `config` check
+/// never fail-fasts on the result); other commands' fail-fast `load` call
+/// arrives with `cli` (#45).
 pub(crate) fn load(path: &Path) -> Result<Config, ConfigError> {
     let bytes = std::fs::read(path).map_err(|source| ConfigError::Io {
         path: path.to_path_buf(),

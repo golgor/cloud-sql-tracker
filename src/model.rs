@@ -295,21 +295,18 @@ pub(crate) struct StatusDocument {
 
 /// One `doctor` check's severity (`docs/doctor.v1.md`).
 ///
-/// Already constructed by `supervisor`/`env`/`journal` check rows, but not
-/// yet consumed by a `commands::doctor` (#44) or serialized anywhere —
-/// remove this `allow` once #44 lands.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serializes to the Doctor report's lowercase `status` strings
+/// (`docs/doctor.v1.md`, "`checks[]` element").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum CheckStatus {
     Pass,
     Warn,
     Fail,
 }
 
-/// One `doctor --json` `checks[]` element. Unused outside adapter checks
-/// until `commands::doctor` (#44) lands — remove this `allow` then.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One `doctor --json` `checks[]` element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CheckRow {
     pub(crate) id: String,
     pub(crate) status: CheckStatus,
@@ -317,10 +314,8 @@ pub(crate) struct CheckRow {
     pub(crate) hint: Option<String>,
 }
 
-/// The `doctor --json` document (`docs/doctor.v1.md`). Unused until
-/// `commands::doctor` (#44) lands — remove this `allow` then.
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The `doctor --json` document (`docs/doctor.v1.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct DoctorReport {
     pub(crate) version: u32,
     pub(crate) cli_version: String,
