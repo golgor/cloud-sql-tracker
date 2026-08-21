@@ -20,6 +20,7 @@ cloud-sql-tracker stop --group backend
 | Status document v1 | [docs/status-document.v1.md](docs/status-document.v1.md) · [schema](schemas/status.v1.json) · [example](examples/status.v1.json) |
 | CLI contract v1 | [docs/cli-contract.v1.md](docs/cli-contract.v1.md) |
 | Module seams v1 | [docs/modules.v1.md](docs/modules.v1.md) |
+| Verification v1 | [docs/verification.v1.md](docs/verification.v1.md) |
 | Config v1 | [docs/config.v1.md](docs/config.v1.md) · [schema](schemas/config.v1.json) · [example](examples/connections.json) |
 | Agent guide | [AGENTS.md](AGENTS.md) |
 | ADRs | [docs/adr/](docs/adr/) |

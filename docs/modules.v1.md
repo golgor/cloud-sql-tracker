@@ -15,7 +15,7 @@
 | I/O posture | [`docs/adr/0004-rust-toolchain-and-linux-io.md`](./adr/0004-rust-toolchain-and-linux-io.md) |
 | Wayfinder freeze | [issue #14](https://github.com/golgor/cloud-sql-tracker/issues/14) |
 
-This freeze is **module interfaces**, not code. The binary remains a stub until after [#13](https://github.com/golgor/cloud-sql-tracker/issues/13). Product contracts above stay frozen; this document only places them in `src/`.
+This freeze is **module interfaces**, not code. The binary remains a stub until the implementation map. Product contracts above stay frozen; this document only places them in `src/`. Test / dogfood strategy: [`docs/verification.v1.md`](./verification.v1.md).
 
 Use these design terms exactly: **module**, **interface**, **implementation**, **depth**, **seam**, **adapter**, **leverage**, **locality**. Domain terms stay in `CONTEXT.md` (Connection, Reconcile, Unit, Supervisor, Foreign process, …).
 
@@ -175,7 +175,7 @@ Matches [`docs/reconcile.v1.md`](./reconcile.v1.md). Same inputs ⇒ same output
 
 **Does not** build the Reconcile `Observation`. Returns `UnitSnapshot`; `commands` composes Observation with `port`.
 
-**Seam discipline:** one adapter (real systemd). **No `trait Supervisor`.** Reconcile tests construct `Observation` as structs. If #13 needs an in-process fake for `commands`, add that seam **then**.
+**Seam discipline:** one adapter (real systemd). **No `trait Supervisor`.** Reconcile tests construct `Observation` as structs. Selector expansion and `--failed` filtering are **pure** (see [`verification.v1.md`](./verification.v1.md)); do **not** add a commands fake / trait for tests.
 
 ### `port` — liveness + attribution
 
@@ -353,9 +353,9 @@ fn main() {
 - Exact Rust type names; `supervisor.rs` vs `supervisor/mod.rs`.
 - zbus vs `systemd-run` (internal to `supervisor`).
 - `listeners` crate vs hand-rolled procfs (internal to `port`).
-- Test pyramid (**#13**).
+- Test pyramid — frozen in [`docs/verification.v1.md`](./verification.v1.md).
 - Async runtime (v1 is a sync CLI).
-- `SOFTWARE_DESIGN.md` (later, after #13 if useful).
+- `SOFTWARE_DESIGN.md` (optional, once implementation starts).
 
 ---
 
