@@ -221,26 +221,27 @@ pub(crate) enum PortProbe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorCode {
-    /// `start` only (#43) — `reconcile` never constructs this. `doctor`
-    /// (#44) reports a missing `proxy_bin` as its own `CheckRow`, not this.
-    #[allow(dead_code)]
+    /// `commands::start` (#43) may surface this; doctor reports missing
+    /// `proxy_bin` as a `CheckRow`, not this code. `reconcile` never
+    /// constructs this.
     BinMissing,
     PortInUse,
     ExecFailed,
     UnitFailed,
     StartTimeout,
-    /// `start` only (#43) — `reconcile` never constructs this.
-    #[allow(dead_code)]
+    /// `commands::start` (#43) constructs this when Application Default
+    /// Credentials are missing; `reconcile` never constructs this.
     Auth,
     /// A Connection field that only breaks at runtime, e.g. `address` is
     /// not a valid IP (`docs/config.v1.md` only requires a non-empty
     /// string). `commands::status` (#42) constructs this per-row instead of
-    /// failing the whole Status document.
+    /// failing the whole Status document; `commands::stop`/`restart` (#43)
+    /// also uses it for the (practically unreachable) case where a
+    /// config-valid id fails `model::unit_name`.
     Config,
-    /// Fallback for `start` (#43) — `reconcile` never constructs this; its
-    /// own unmapped cases already have named codes. `doctor` (#44) has no
-    /// use for this: it reports `CheckRow`s, never a Status `error.code`.
-    #[allow(dead_code)]
+    /// Fallback for `commands::start`/`stop`/`restart` (#43) — `reconcile`
+    /// never constructs this; its own unmapped cases already have named
+    /// codes. `doctor` reports `CheckRow`s, not this code.
     Unknown,
 }
 

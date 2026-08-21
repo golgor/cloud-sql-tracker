@@ -7,10 +7,9 @@
 //!
 //! This module does not build Reconcile's `Observation` — it returns
 //! [`UnitSnapshot`], a supervisor-local shape. `commands::status` (#42) maps
-//! a `show` snapshot into `reconcile::UnitObservation`, and
+//! a `show` snapshot into `reconcile::UnitObservation`.
+//! `commands::mutate` (#43) calls `start_transient` and `stop`.
 //! `commands::doctor` (#44) calls `systemd_user_check` directly.
-//! `start_transient` and `stop` are still only reachable from mutate (#43)
-//! and stay individually `#[allow(dead_code)]` until it lands.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -289,9 +288,6 @@ fn read_snapshot(
 /// `GOOGLE_APPLICATION_CREDENTIALS`) — this module does not resolve ADC or
 /// `PATH` itself; that is `env`'s job (`docs/modules.v1.md`, "env").
 ///
-/// Only reachable from mutate (#43) so far; `proxy_argv` below is already
-/// exercised directly by this module's own tests.
-#[allow(dead_code)]
 pub(crate) fn start_transient(
     connection: &Connection,
     proxy_bin: &Path,
@@ -373,8 +369,6 @@ fn proxy_argv(connection: &Connection, proxy_bin: &Path) -> Vec<String> {
 /// never loaded is already stopped: idempotent success, not an error
 /// (`docs/research/supervisor-io.md`, "stop").
 ///
-/// Only reachable from mutate (#43) so far.
-#[allow(dead_code)]
 pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
     let conn = connect()?;
     let manager = manager_proxy(&conn)?;
