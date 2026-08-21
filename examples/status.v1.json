@@ -94,7 +94,7 @@
       "source": "none",
       "pid": null,
       "unit": "cloud-sql-proxy-fe-prod.service",
-      "port_open": false,
+      "port_open": true,
       "uptime_sec": null,
       "error": {
         "code": "port_in_use",

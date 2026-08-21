@@ -34,7 +34,7 @@ One-liner scripts like `cloud-sql-proxy project:region:instance` all default to 
 - explicit ports (e.g. 15432+)
 - start/stop (planned: `systemd --user` transient units)
 - `status --json` for bars and scripts
-- orphan detection for processes started outside the tool
+- port-conflict detection when something else already holds a Connection’s port
 
 ## Install (planned)
 
