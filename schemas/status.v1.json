@@ -154,12 +154,12 @@
         "state": {
           "type": "string",
           "enum": ["stopped", "starting", "running", "error"],
-          "description": "Health state after reconcile. running means unit-or-orphan active AND local TCP accept."
+          "description": "Health state after reconcile. running means our unit active AND local TCP accept."
         },
         "source": {
           "type": "string",
-          "enum": ["unit", "orphan", "none"],
-          "description": "unit = managed systemd user unit; orphan = matching proxy not under our unit; none = no process."
+          "enum": ["unit", "none"],
+          "description": "unit = managed systemd user unit MainPID; none = no managed process (port conflicts use error/port_in_use, not a third source)."
         },
         "pid": {
           "type": ["integer", "null"],

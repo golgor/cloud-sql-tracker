@@ -14,7 +14,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 
 | Doc | Why |
 |-----|-----|
-| [`CONTEXT.md`](./CONTEXT.md) | Domain language (Connection, Status document, Health state, Orphan, …) |
+| [`CONTEXT.md`](./CONTEXT.md) | Domain language (Connection, Status document, Health state, Foreign process, …) |
 | [`docs/DESIGN.md`](./docs/DESIGN.md) | Product decisions |
 | [`docs/adr/`](./docs/adr/) | Hard-to-reverse choices |
 | [`docs/cli-contract.v1.md`](./docs/cli-contract.v1.md) | **Argv, --version, exit codes** |
@@ -60,7 +60,7 @@ If a JSON field is unclear, **open `docs/status-document.v1.md`** — that file 
 
 - Stateless CLI; long-lived work is `cloud-sql-proxy` under `systemd --user`.
 - ADC is a hard requirement ([ADR 0002](./docs/adr/0002-adc-only-auth.md)).
-- v1 health = unit/orphan + local TCP accept ([ADR 0003](./docs/adr/0003-local-health-signals.md)).
+- v1 health = **our Unit** + local TCP accept; no Orphan adopt ([ADR 0003](./docs/adr/0003-local-health-signals.md), [`reconcile.v1.md`](./docs/reconcile.v1.md)).
 - Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)).
 
 ## Wayfinder

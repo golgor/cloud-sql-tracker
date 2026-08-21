@@ -19,7 +19,7 @@ Producers: only the control plane CLI (`status --json`).
 One **Status document** is a **point-in-time snapshot** of every configured Connection after reconcile:
 
 - Config says what *should* exist (id, name, ports, …).
-- Reconcile observes Unit / Orphan / port and assigns a **Health state** (rules: [`reconcile.v1.md`](./reconcile.v1.md)).
+- Reconcile observes Unit / port / listener and assigns a **Health state** (rules: [`reconcile.v1.md`](./reconcile.v1.md)).
 - Aggregates at the top are derived only from `connections[].state` (and group keys).
 
 This is **not** a config file, not a log stream, and not a doctor report.
@@ -118,10 +118,10 @@ Exactly one of:
 
 | Value | Meaning (v1) |
 |-------|----------------|
-| `stopped` | No managed unit active, no matching Orphan, not in a start wait. |
+| `stopped` | No managed unit active, port closed, not in a start wait. |
 | `starting` | Start requested / unit activating / waiting for `port_open` within timeout window. |
-| `running` | Unit active **or** healthy Orphan, **and** `port_open === true`. |
-| `error` | Failed start, crashed unit, port held by wrong process, start timeout, etc. |
+| `running` | Our Unit active **and** `port_open === true` (listener is ours or PID unknown). |
+| `error` | Failed start, crashed unit, port held without our Unit, start timeout, etc. |
 
 No `degraded` in v1 (upstream Cloud SQL reachability is out of band — see deferred health-check research).
 
@@ -132,15 +132,16 @@ Orthogonal to `state`:
 | Value | Meaning |
 |-------|---------|
 | `unit` | Process is the MainPID of our expected user Unit. |
-| `orphan` | Matching Proxy process found (cmdline/port) **not** under our Unit. |
-| `none` | No proxy process attributed. |
+| `none` | No managed Unit process attributed. |
+
+There is **no** `orphan` Source in v1. A leftover proxy on the port is `error` + `port_in_use`, not `running`.
 
 Typical combos:
 
 - `running` + `unit` — normal managed
-- `running` + `orphan` — old script / hand-started proxy we recognize
 - `stopped` + `none` — idle
-- `error` + `none` — failed start / port conflict with non-proxy
+- `error` + `none` — failed start / port held by Foreign process (including hand-started proxy)
+- `error` + `unit` — unit confused / failed while still loaded
 - `starting` + `unit` or `none` — mid-start
 
 ### `error` object
@@ -157,7 +158,7 @@ When non-null:
 | `code` | Typical situation |
 |--------|-------------------|
 | `bin_missing` | `cloud-sql-proxy` not executable / not found |
-| `port_in_use` | Configured port held by something that is not this Connection’s proxy |
+| `port_in_use` | Configured port held by something that is not this Connection’s **managed Unit** (Docker, leftover script proxy, wrong PID, …) |
 | `exec_failed` | Unit failed to exec proxy |
 | `unit_failed` | Unit reached failed / proxy exited unexpectedly |
 | `start_timeout` | Still not `port_open` after start wait |

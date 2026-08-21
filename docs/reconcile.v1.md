@@ -5,13 +5,13 @@
 | Artifact | Path |
 |----------|------|
 | This prose | `docs/reconcile.v1.md` |
-| Domain terms | [`CONTEXT.md`](../CONTEXT.md) (Reconcile, Health state, Source, Orphan, Foreign process, …) |
+| Domain terms | [`CONTEXT.md`](../CONTEXT.md) (Reconcile, Health state, Source, Foreign process, …) |
 | Status field meanings | [`docs/status-document.v1.md`](./status-document.v1.md) |
 | CLI wait flag | [`docs/cli-contract.v1.md`](./cli-contract.v1.md) (`--wait-ms`) |
 | Unit / port research | [`docs/research/systemd-user-units.md`](./research/systemd-user-units.md), [`docs/research/port-liveness.md`](./research/port-liveness.md) |
 | Wayfinder freeze | [issue #9](https://github.com/golgor/cloud-sql-tracker/issues/9) |
 
-Orphan **match keys** and start/stop behavior toward orphans: [issue #10](https://github.com/golgor/cloud-sql-tracker/issues/10) (consumes “orphan yes/no + pid” as an input here).
+**v1 does not adopt Orphans.** A Proxy process (or any other process) on the configured port **without** our Unit is always a conflict (`error` / `port_in_use`), never `running`. See [Non-goals](#non-goals-v1).
 
 ---
 
@@ -20,7 +20,7 @@ Orphan **match keys** and start/stop behavior toward orphans: [issue #10](https:
 **Reconcile is read-only classification**, not a desired-state controller and not process takeover.
 
 ```text
-config identity  +  Unit snapshot  +  port probe  +  listener/Orphan signals  +  clock
+config identity  +  Unit snapshot  +  port probe  +  listener PID  +  clock
         │
         ▼
    reconcile()     ← pure: same inputs ⇒ same outputs (unit-testable)
@@ -31,14 +31,14 @@ config identity  +  Unit snapshot  +  port probe  +  listener/Orphan signals  + 
 
 | Does | Does not |
 |------|----------|
-| Observe Unit / port / process attribution | Start or stop processes |
+| Observe Unit / port / listener PID | Start or stop processes |
 | Assign `stopped` \| `starting` \| `running` \| `error` | Run a background loop |
-| Fill Source, pid, error, uptime when known | “Adopt” an Orphan into a Unit (lifecycle / #10) |
+| Fill Source (`unit` \| `none`), pid, error, uptime when known | Treat non-unit proxies as healthy / adopt into systemd |
 | Stay free of hidden global CLI state | Require a state file for start deadlines |
 
 Lifecycle commands (`start` / `stop` / `restart`) **change** the world, then may call the same function to **read** it. Plain `status` only reads.
 
-v1 Health is **local** (Unit/Orphan + TCP accept), not Cloud SQL upstream readiness ([ADR 0003](./adr/0003-local-health-signals.md)).
+v1 Health is **local** (our Unit + TCP accept), not Cloud SQL upstream readiness ([ADR 0003](./adr/0003-local-health-signals.md)).
 
 ---
 
@@ -50,7 +50,7 @@ Normative intent (names may differ in code):
 reconcile(connection_identity, observation, now) -> status_row_fields
 ```
 
-- **No I/O inside** the pure core: callers gather Unit properties, port probe, listener PID, Orphan match, then pass structs in.
+- **No I/O inside** the pure core: callers gather Unit properties, port probe, listener PID, then pass structs in.
 - **`now`** is an explicit input (for start-window age), not an implicit `SystemTime::now()` buried in the core — tests inject a fixed clock.
 - **`enabled`** from config is **not** an input to Health math (see below).
 
@@ -61,8 +61,8 @@ Reconcile is responsible for:
 | Field | Rule sketch |
 |-------|-------------|
 | `state` | Health state enum |
-| `source` | `unit` \| `orphan` \| `none` |
-| `pid` | MainPID, orphan pid, or `null` |
+| `source` | `unit` \| `none` only |
+| `pid` | Unit `MainPID` when known and relevant; else `null` |
 | `port_open` | boolean (see probe mapping) |
 | `uptime_sec` | From unit `ExecMainStartTimestamp` or process start time when known; else `null` |
 | `error` | `null` unless `state === "error"`; then `{ code, detail }` |
@@ -78,10 +78,10 @@ Identity fields (`id`, `name`, `group`, `instance`, `address`, `port`, `private_
 |-------|---------|
 | **Unit snapshot** | Load/presence, `ActiveState`, `SubState`, `MainPID`, `Result`, `ExecMainStatus` / signal info, `ExecMainStartTimestamp` (or equivalent age) |
 | **Port probe** | TCP connect to configured `address:port` → Open / Closed / Unreachable |
-| **Listener PID** | Best-effort PID owning the listen socket (may be unknown) |
-| **Orphan match** | Boolean + pid: matching Proxy process **not** under our Unit (match algorithm frozen in #10) |
-| **Foreign holder** | When port is open and the holder is neither MainPID nor a matching Orphan — treat as Foreign process |
+| **Listener PID** | Best-effort PID owning the listen socket (may be unknown) — for MainPID match and `port_in_use` detail |
 | **Clock** | `now` for age vs start window |
+
+No cmdline / instance “Orphan match” input in v1.
 
 ### `port_open` mapping
 
@@ -100,7 +100,7 @@ When reporting `port_in_use` (and similar), put best-effort holder identity in *
 - Prefer: `port 15432 held by docker-proxy (pid 1234)`
 - Fallback: `held by pid 1234` / `held by unknown process`
 
-Lookup: listener PID + `/proc/<pid>/comm` (and optionally exe basename). **Never fail Reconcile** if name lookup fails.
+Lookup: listener PID + `/proc/<pid>/comm` (and optionally exe basename). **Never fail Reconcile** if name lookup fails. A leftover `cloud-sql-proxy` from an old script is still `port_in_use` — name in detail only.
 
 ---
 
@@ -138,14 +138,13 @@ If prose and table ever drift, **fix the table** and then reword the summary. Do
 
 When scanning observations by hand, highest matching idea wins:
 
-1. Foreign / mismatched listener on the port → `error` / `port_in_use`
+1. Port open without our healthy unit ownership (Foreign / mismatched / no unit) → `error` / `port_in_use`
 2. True unit failure (not clean stop) → `error` / `exec_failed` or `unit_failed`
 3. Unit up + port open + PID OK/unknown → `running` / `unit`
-4. No our unit + matching Orphan + port open → `running` / `orphan`
-5. Start window + port closed → `starting`
-6. Activating past window, port closed → `start_timeout`
-7. Active past window, port closed → `unit_failed`
-8. Idle (inactive, port closed, no Orphan) → `stopped`
+4. Start window + port closed → `starting`
+5. Activating past window, port closed → `start_timeout`
+6. Active past window, port closed → `unit_failed`
+7. Idle (inactive, port closed) → `stopped`
 
 ### PID attribution (also in the table)
 
@@ -154,20 +153,18 @@ When scanning observations by hand, highest matching idea wins:
 | Unknown + unit active + port open | Trust unit → `running` / `unit` |
 | Equals `MainPID` | `running` / `unit` |
 | Known ≠ `MainPID` | `error` / `port_in_use` |
-| No unit + Orphan + port open | `running` / `orphan` |
-| No unit + port open + not Orphan | `error` / `port_in_use` |
+| No unit (inactive/not-found) + port open | `error` / `port_in_use` (any holder, including cloud-sql-proxy) |
 
 ---
 
 ## Truth table (normative)
 
-Unit column is simplified from systemd `ActiveState` (+ failed/clean handling). “Orphan” means match already true (#10). “Start window” as defined above. **This table is authoritative.**
+Unit column is simplified from systemd `ActiveState` (+ failed/clean handling). “Start window” as defined above. **This table is authoritative.**
 
 | Unit (simplified) | port_open | Process signal | Start window | → state | source | error.code |
 |-------------------|-----------|----------------|--------------|---------|--------|------------|
 | none / inactive / dead | no | none | — | `stopped` | `none` | — |
-| none / inactive | yes | Orphan match | — | `running` | `orphan` | — |
-| none / inactive | yes | Foreign / unknown non-orphan | — | `error` | `none` | `port_in_use` |
+| none / inactive | yes | any holder (known or unknown) | — | `error` | `none` | `port_in_use` |
 | activating | no | — | yes | `starting` | `unit` or `none` | — |
 | activating | no | — | no (past T) | `error` | `unit` | `start_timeout` |
 | activating | yes | MainPID / unknown OK | — | `running` | `unit` | — |
@@ -190,7 +187,7 @@ Subset of the Status catalog; new codes remain additive for consumers.
 
 | code | When |
 |------|------|
-| `port_in_use` | Port open but holder is Foreign, or listener PID known ≠ MainPID |
+| `port_in_use` | Port open but not owned by our Unit (no unit, Foreign holder, or listener PID ≠ MainPID) |
 | `start_timeout` | Still `activating` and port closed after start window |
 | `unit_failed` | Unit failed unexpectedly, or `active` with port closed outside start window |
 | `exec_failed` | Unit/exec failed before a steady proxy process (binary/args) |
@@ -210,12 +207,14 @@ Managed Proxy processes **always** receive `--exit-zero-on-sigterm` on the unit 
 
 After `systemctl --user stop` (or equivalent): best-effort **`reset-failed`** on that unit name so a later `status` sees `not-found`/`inactive` instead of a sticky `failed` row.
 
+**`stop` only stops our Unit** — it does **not** SIGTERM/SIGKILL Foreign processes. Clearing a leftover listener is manual (pid in `error.detail` / doctor).
+
 ### Pure Reconcile — when `ActiveState=failed` still means `stopped`
 
 Use this only as a **fallback** if `reset-failed` was skipped or raced. Classify as **`stopped` / `source: none`** when **all** of the following hold:
 
 1. `port_open === false`
-2. No live Proxy process attributed (`MainPID` is 0/absent; no Orphan match)
+2. No live process under our Unit (`MainPID` is 0/absent)
 3. Unit properties match a **clean termination** pattern (any one branch):
 
 | Branch | systemd fields (typical) | Meaning |
@@ -237,15 +236,13 @@ Also require `ExecMainCode` consistent with exit/killed (implementers: treat unk
 
 Do **not** treat SIGKILL (9) as clean stop: that usually means stop timeout or manual kill -9.
 
-Orphans / hand-started proxies may lack `--exit-zero-on-sigterm`; stop-by-PID timing is #10.
-
 ---
 
 ## `enabled: false`
 
 Config rule ([config v1](./config.v1.md)): disabled Connections still appear in the Status document; explicit single-id `start`/`restart` is rejected (exit 2); multi-target start **skips** them.
 
-**Reconcile ignores `enabled`.** Health reflects the real machine. A disabled Connection that still has a Proxy process up is honestly `running` (unit or orphan). Disable gates **start policy**, not truthfulness of status.
+**Reconcile ignores `enabled`.** Health reflects the real machine. A disabled Connection whose Unit is still up is honestly `running` / `unit`. Disable gates **start policy**, not truthfulness of status.
 
 ---
 
@@ -265,12 +262,11 @@ Brief flicker is acceptable; no `stopping` enum value.
 | Situation | source |
 |-----------|--------|
 | Health from our Unit’s process | `unit` |
-| Health from matching Orphan | `orphan` |
-| No attributed Proxy process | `none` |
-| `port_in_use` with no our proxy | often `none` |
+| No attributed managed process | `none` |
+| `port_in_use` (no our unit owning the port) | `none` |
 | Unit exists but error without process | `unit` or `none` depending on MainPID |
 
-Source is **orthogonal** to Health state (e.g. `running`+`orphan`, `error`+`unit`).
+Source is **orthogonal** to Health state (e.g. `running`+`unit`, `error`+`none`).
 
 ---
 
@@ -278,10 +274,11 @@ Source is **orthogonal** to Health state (e.g. `running`+`orphan`, `error`+`unit
 
 | Concern | Owner |
 |---------|--------|
-| Whether to create a Unit / kill a process | `start` / `stop` / #10 |
+| Whether to create / stop a Unit | `start` / `stop` / `restart` |
 | How long CLI blocks waiting for `running` | `--wait-ms` (default **10000**) |
 | Whether a row is `starting` vs `start_timeout` / `unit_failed` on any command | **This document** + unit timestamps |
-| Idempotent start when already `running` (unit or healthy orphan) | CLI contract; classification from Reconcile |
+| Idempotent start when already `running` | Only managed `running` (`source: unit`); port conflict is **not** success |
+| Port held without our unit | `start` fails for that id (`port_in_use`); operator frees the port manually |
 
 ---
 
@@ -290,16 +287,19 @@ Source is **orthogonal** to Health state (e.g. `running`+`orphan`, `error`+`unit
 - Continuous reconcile loop or in-process daemon  
 - State file of start deadlines  
 - Proxy HTTP `--health-check` / upstream readiness in Health state ([#15](https://github.com/golgor/cloud-sql-tracker/issues/15))  
-- Orphan cmdline match algorithm and stop-by-PID details ([#10](https://github.com/golgor/cloud-sql-tracker/issues/10))  
+- **Orphan happy path:** cmdline match, `source: orphan`, `running` without Unit, start no-op on foreign proxy, stop-by-PID / adopt-into-systemd  
 - New Status schema fields for holder pid/comm (detail string only)  
 - Per-Connection configurable start timeout in `connections.json`  
-- Painting disabled-but-running as automatic `error`
+- Painting disabled-but-running as automatic `error`  
+- CLI killing Foreign processes on `stop`
+
+Migration from old hand-started proxies: stop those processes once manually (pid often in `error.detail`), then `start` under systemd.
 
 ---
 
 ## Expected iteration
 
-Truth table and code choice for “active + port closed after a long healthy run” (`unit_failed`) vs rare edge cases may be refined after dogfood. Prefer **additive** codes and clearer `detail` before breaking Status `version`.
+Truth table and code choice for “active + port closed after a long healthy run” (`unit_failed`) vs rare edge cases may be refined after dogfood. Prefer **additive** codes and clearer `detail` before breaking Status `version`. Re-introducing Orphan support would be an explicit product decision (new ticket), not a silent implementer choice.
 
 ---
 
@@ -307,6 +307,7 @@ Truth table and code choice for “active + port closed after a long healthy run
 
 1. Structs for observation + pure `reconcile` with injected `now`.  
 2. Table-driven unit tests per truth-table row (no systemd in the pure tests).  
-3. Integration: gather Unit via `systemctl --user show` / D-Bus; port via `connect_timeout`; PID via listeners/procfs.  
+3. Integration: gather Unit via `systemctl --user show` / D-Bus; port via `connect_timeout`; listener PID via listeners/procfs for match + detail.  
 4. Unit template: `Type=exec`, forward ADC env, **`--exit-zero-on-sigterm`**, `reset-failed` on stop/restart paths.  
-5. Wire `status --json` aggregates only from reconciled `state` values.
+5. Wire `status --json` aggregates only from reconciled `state` values.  
+6. Do **not** implement Orphan match or kill-by-PID in v1.

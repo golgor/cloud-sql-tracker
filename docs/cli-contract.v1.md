@@ -129,7 +129,7 @@ cloud-sql-tracker start [--wait-ms N] <ID | --group NAME | --all>
 |------|---------|
 | `--wait-ms N` | Optional max wait for each target to become `running` (port open) before counting that id as failed. Default: **10000** (10s). Same numeric ceiling as Reconcile’s start window; see [`reconcile.v1.md`](./reconcile.v1.md). |
 
-**Idempotency:** if a target is already `running` (managed unit or healthy orphan) → **success no-op** for that id (exit contribution: success).
+**Idempotency:** if a target is already `running` (managed unit, `source: unit`) → **success no-op** for that id (exit contribution: success). Port held without our unit (`port_in_use`) is **not** a successful no-op — start fails for that id until the operator frees the port.
 
 ### `stop`
 
