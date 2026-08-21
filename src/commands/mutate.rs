@@ -241,6 +241,17 @@ fn try_start(connection: &Connection, config: &Config, wait_ms: u64) -> TargetRe
     if let Some(result) = start_idempotent_or_conflict(&row) {
         return result;
     }
+    if row.state == HealthState::Starting {
+        // The Unit is already `activating` (a retried `start`, or a
+        // `restart` handoff that raced with systemd's own transition out
+        // of `deactivating`) — a second `StartTransientUnit` for the same
+        // unit name would fail with systemd's `UnitExists`
+        // (`org.freedesktop.systemd1.Manager.StartTransientUnit`: a
+        // still-loaded unit, including one mid-activation, is not a valid
+        // target for a fresh transient start). Wait for it to finish
+        // coming up instead of issuing a redundant start.
+        return wait_for(connection, wait_ms, is_running, ErrorCode::StartTimeout);
+    }
 
     let proxy_bin = match resolve_proxy_bin_or_failure(config) {
         Ok(path) => path,
@@ -257,15 +268,17 @@ fn try_start(connection: &Connection, config: &Config, wait_ms: u64) -> TargetRe
     wait_for(connection, wait_ms, is_running, ErrorCode::StartTimeout)
 }
 
-/// `env::resolve_proxy_bin`, converted into a [`TargetResult::Failed`] with
-/// `error.code: bin_missing` on failure (`docs/status-document.v1.md`,
-/// "`error` object" catalog). Reuses `env::proxy_bin_check`'s message
-/// instead of duplicating it.
+/// `env::resolve_proxy_bin`, converted into a [`TargetResult::Dependency`]
+/// on failure. `config.proxy_bin` is one value for the whole config —
+/// `Connection` has no per-id override — so an unresolved binary fails
+/// identically for every target in this batch, matching
+/// `docs/cli-contract.v1.md`'s exit `3`: "proxy binary unresolved when
+/// required for the whole command". Reuses `env::proxy_bin_check`'s
+/// message instead of duplicating it.
 fn resolve_proxy_bin_or_failure(config: &Config) -> Result<PathBuf, TargetResult> {
     env::resolve_proxy_bin(Some(&config.proxy_bin)).map_err(|_| {
         let check = env::proxy_bin_check(Some(&config.proxy_bin));
-        TargetResult::Failed {
-            code: ErrorCode::BinMissing,
+        TargetResult::Dependency {
             message: check_message(&check.detail, check.hint.as_deref()),
         }
     })
@@ -391,6 +404,19 @@ pub(crate) fn restart(
     Ok(BatchOutcome { targets })
 }
 
+/// Whether `restart`'s stop step succeeded well enough to attempt
+/// `try_start` next. A per-Connection [`TargetResult::Failed`] means this
+/// Connection could not even be stopped; an environmental
+/// [`TargetResult::Dependency`] (e.g. the systemd user bus is unreachable)
+/// is a condition a second D-Bus call cannot route around either — both
+/// must be returned as-is instead of falling through to a doomed
+/// `try_start`. Pure and separated from [`restart_target`] itself so this
+/// gate is unit-testable without a fake Supervisor
+/// (`docs/modules.v1.md`, "supervisor": "No `trait Supervisor`").
+fn stop_succeeded(result: &TargetResult) -> bool {
+    *result == TargetResult::Succeeded
+}
+
 fn restart_target(
     connection: &Connection,
     config: &Config,
@@ -401,11 +427,10 @@ fn restart_target(
         return outcome_for(&connection.id, result);
     }
     // "for each target: stop then start (no deeper magic)"
-    // (`docs/cli-contract.v1.md`, "`restart`"). A stop failure skips the
-    // start attempt entirely — a Connection that could not even be
-    // stopped is not a candidate for a fresh start.
+    // (`docs/cli-contract.v1.md`, "`restart`"). See [`stop_succeeded`] for
+    // why only a genuine success proceeds to `try_start`.
     let stop_result = try_stop(connection, wait_ms);
-    if matches!(stop_result, TargetResult::Failed { .. }) {
+    if !stop_succeeded(&stop_result) {
         return outcome_for(&connection.id, stop_result);
     }
     outcome_for(&connection.id, try_start(connection, config, wait_ms))
@@ -496,14 +521,18 @@ fn status_command_result(err: StatusCommandError) -> TargetResult {
 /// `supervisor::start_transient`/`supervisor::stop` the same way
 /// [`status_command_result`] classifies one wrapped inside a
 /// [`StatusCommandError`] — one place decides "is this environmental".
+/// Delegates to [`SupervisorError::is_dependency`] rather than repeating
+/// the `Bus`-only check here, so both call sites and `supervisor` itself
+/// agree on what counts as "cannot operate at all".
 fn supervisor_result(err: SupervisorError) -> TargetResult {
     let message = err.to_string();
-    match err {
-        SupervisorError::Bus(_) => TargetResult::Dependency { message },
-        _ => TargetResult::Failed {
+    if err.is_dependency() {
+        TargetResult::Dependency { message }
+    } else {
+        TargetResult::Failed {
             code: ErrorCode::Unknown,
             message,
-        },
+        }
     }
 }
 
@@ -528,12 +557,20 @@ fn is_stopped(row: &StatusRow) -> bool {
 /// Reconcile)") — so a Foreign holder that keeps the configured port open
 /// after our Unit is gone (`error`/`port_in_use`, `source: none`) is a
 /// separate, pre-existing condition `stop` cannot wait out; it still
-/// counts as `stop` having done its job. Per `docs/reconcile.v1.md`'s
-/// truth table, `running`/`starting` always pair with `source: unit`, so
-/// "our Unit is no longer active" reduces to "Health state is neither of
-/// those two".
+/// counts as `stop` having done its job.
+///
+/// **Not** `!matches!(state, Running | Starting)` — `docs/reconcile.v1.md`'s
+/// truth table lets an *active* Unit report Health `error` too (e.g. our
+/// Unit is active but a mismatched listener holds the port,
+/// `source: unit`). Treating every `error` as "done" would let `stop`
+/// report success while our own Unit is still genuinely active. Instead:
+/// complete once the row is no longer attributed to our Unit at all
+/// (`source != Source::Unit`), or once Health has actually reached
+/// `stopped` (including the `deactivating` + closed-port + known-pid row,
+/// which is `Stopped`/`source: unit` — the Unit is on its way out and
+/// `docs/reconcile.v1.md`'s own table already calls that `stopped`).
 fn unit_no_longer_active(row: &StatusRow) -> bool {
-    !matches!(row.state, HealthState::Running | HealthState::Starting)
+    row.source != Source::Unit || row.state == HealthState::Stopped
 }
 
 /// A reconciled row's own `error` is already stable — every `error.code`
@@ -945,6 +982,36 @@ mod tests {
             .all(|target| target.result == TargetResult::SkippedDisabled));
     }
 
+    // -- stop_succeeded (restart's stop-then-start gate) --------------------
+
+    #[test]
+    fn stop_succeeded_is_true_only_for_a_genuine_success() {
+        assert!(stop_succeeded(&TargetResult::Succeeded));
+    }
+
+    #[test]
+    fn stop_succeeded_is_false_for_a_per_connection_failure() {
+        // `restart` must not attempt `try_start` after a stop it could
+        // not confirm — the failed stop's own result is the batch's
+        // answer for this id.
+        let result = TargetResult::Failed {
+            code: ErrorCode::Unknown,
+            message: "boom".to_string(),
+        };
+        assert!(!stop_succeeded(&result));
+    }
+
+    #[test]
+    fn stop_succeeded_is_false_for_a_dependency_failure() {
+        // An environmental stop failure (e.g. no systemd user bus) must
+        // not be swallowed by falling through to `try_start` — a second
+        // D-Bus call cannot succeed either.
+        let result = TargetResult::Dependency {
+            message: "no bus".to_string(),
+        };
+        assert!(!stop_succeeded(&result));
+    }
+
     // -- error classification: SupervisorError / StatusCommandError ---------
 
     #[test]
@@ -967,6 +1034,21 @@ mod tests {
                 message,
             }
         );
+    }
+
+    // -- resolve_proxy_bin_or_failure ---------------------------------------
+
+    #[test]
+    fn resolve_proxy_bin_or_failure_is_a_dependency_not_a_per_connection_failure() {
+        // `config.proxy_bin` is one value for the whole config — every
+        // target in the batch fails identically when it cannot be
+        // resolved, matching `docs/cli-contract.v1.md`'s exit `3`: "proxy
+        // binary unresolved when required for the whole command".
+        let config = config(vec![connection("a", true)]);
+        let mut broken = config.clone();
+        broken.proxy_bin = "this-binary-does-not-exist-anywhere".to_string();
+        let result = resolve_proxy_bin_or_failure(&broken).expect_err("the binary cannot resolve");
+        assert!(matches!(result, TargetResult::Dependency { .. }));
     }
 
     #[test]
@@ -1032,6 +1114,33 @@ mod tests {
                 detail: "held by pid 999".to_string(),
             }),
         );
+        assert!(unit_no_longer_active(&row));
+    }
+
+    #[test]
+    fn unit_no_longer_active_is_false_for_an_error_still_attributed_to_our_unit() {
+        // `docs/reconcile.v1.md`'s truth table lets an *active* Unit
+        // report Health `error` (e.g. our Unit is active but a mismatched
+        // listener holds the port, `source: unit`). `stop`'s wait loop
+        // must not treat that as "done" just because Health says `error`
+        // — our own Unit is still genuinely active.
+        let row = row(
+            HealthState::Error,
+            Source::Unit,
+            Some(StatusError {
+                code: ErrorCode::PortInUse,
+                detail: "port 15432 held by docker-proxy (pid 4321)".to_string(),
+            }),
+        );
+        assert!(!unit_no_longer_active(&row));
+    }
+
+    #[test]
+    fn unit_no_longer_active_is_true_for_a_deactivating_unit_reconciled_as_stopped() {
+        // `docs/reconcile.v1.md`'s `deactivating` + closed port + known
+        // pid row is already `Stopped`/`source: unit` — the Unit is on its
+        // way out; `stop` should not keep polling it.
+        let row = row(HealthState::Stopped, Source::Unit, None);
         assert!(unit_no_longer_active(&row));
     }
 
