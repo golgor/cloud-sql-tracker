@@ -127,7 +127,7 @@ cloud-sql-tracker start [--wait-ms N] <ID | --group NAME | --all>
 
 | Flag | Meaning |
 |------|---------|
-| `--wait-ms N` | Optional max wait for each target to become `running` (port open) before counting that id as failed. Default: implementation default (freeze numeric default on reconcile/impl ticket if needed; suggested 10_000). |
+| `--wait-ms N` | Optional max wait for each target to become `running` (port open) before counting that id as failed. Default: **10000** (10s). Same numeric ceiling as Reconcile’s start window; see [`reconcile.v1.md`](./reconcile.v1.md). |
 
 **Idempotency:** if a target is already `running` (managed unit or healthy orphan) → **success no-op** for that id (exit contribution: success).
 

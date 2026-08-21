@@ -21,12 +21,24 @@ The versioned JSON snapshot of all Connections’ health and aggregates returned
 _Avoid_: State file, report, healthcheck response
 
 **Health state**:
-One of `stopped` | `starting` | `running` | `error` for a Connection at reconcile time.
+One of `stopped` | `starting` | `running` | `error` for a Connection, produced by Reconcile.
 _Avoid_: Status (ambiguous with Status document), phase
+
+**Reconcile**:
+The read-only mapping, for one Connection at one moment, from config identity plus observed signals (Unit, local port liveness, Proxy process / Orphan attribution) to a Health state and the related Status document fields.
+_Avoid_: Desired-state loop, adopt, heal, sync engine, continuous controller
+
+**Source**:
+Who owns the Proxy process behind a Connection’s Health state: our Unit, an Orphan, or none.
+_Avoid_: Origin, provider, parent (ambiguous)
 
 **Orphan**:
 A Proxy process that matches a Connection (instance/port/cmdline) but was not started under this control plane’s supervisor.
 _Avoid_: Foreign process, leaked proxy (unless stop failed)
+
+**Foreign process**:
+A process holding a Connection’s local port that is not this control plane’s Unit and not a matching Orphan.
+_Avoid_: Orphan (Orphan is a recognized Proxy process), stranger
 
 **Group**:
 A display and bulk-action label on Connections (e.g. `fe`, `backend`, `iot`).
