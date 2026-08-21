@@ -3,13 +3,15 @@
 **Ticket:** [#31 — Research systemd I/O for supervisor](https://github.com/golgor/cloud-sql-tracker/issues/31)  
 ## Summary
 
-Use **only `systemd-run` plus `systemctl --user` in v1**. Do not add `zbus`, do not implement both paths, and do not add `trait Supervisor`.
+Use **only zbus on the user/session bus in v1**. Do not shell out to `systemd-run` / `systemctl`. Do not implement both paths. Do not add `trait Supervisor`.
 
-`zbus` can cover the complete frozen `supervisor` interface without shelling out, but it buys little for this synchronous, stateless v1 CLI: the documented argv already matches the unit contract, `systemctl show` is explicitly the machine-readable systemctl interface, and the shell path avoids adding D-Bus variant serialization plus zbus's blocking/async runtime dependency surface. Keep D-Bus as a possible later replacement inside `supervisor`, not as a second adapter.
+Human override (2026-08-21): the operator chose D-Bus over subprocess. That matches [ADR 0004](../adr/0004-rust-toolchain-and-linux-io.md) (prefer user D-Bus for units). The argv tables below stay as **discarded evidence**, not the v1 adapter.
+
+Same facts either way (Unit present, ActiveState, MainPID, start/stop, `reset-failed`). One pipe into frozen `supervisor`.
 
 ## Findings
 
-1. **Recommendation — shell out in v1 (decision).** `docs/modules.v1.md` deliberately hides either transport inside one concrete `supervisor` adapter and forbids a speculative supervisor trait. The repository currently has no Rust dependencies (`Cargo.toml` says dependencies are intentionally minimal), while zbus's default feature set includes its blocking API and async-I/O support; its blocking calls wrap asynchronous calls with `block_on`. By contrast, the product already documents `systemd-run`/`systemctl` argv, and `systemctl show` is explicitly intended for computer-parsable output. This makes the shell path the smaller v1 implementation and testing surface. [systemctl(1)](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html) [zbus blocking API](https://docs.rs/zbus/latest/zbus/blocking/index.html) [zbus features](https://docs.rs/crate/zbus/latest/features) [local module freeze](../modules.v1.md)
+1. **Recommendation — zbus in v1 (human decision).** `docs/modules.v1.md` hides either transport inside one concrete `supervisor` adapter and forbids a speculative supervisor trait. The research default was argv (smaller crate graph, docs already list `systemd-run` flags). The operator chose D-Bus so the Control plane does not parse `systemctl` text. Cost: add `zbus` (blocking API; default features include async/`block_on`). [zbus blocking API](https://docs.rs/zbus/latest/zbus/blocking/index.html) [zbus features](https://docs.rs/crate/zbus/latest/features) [ADR 0004](../adr/0004-rust-toolchain-and-linux-io.md) [local module freeze](../modules.v1.md)
 
 2. **zbus is functionally complete, but should not be used alongside argv.** On the user/session bus, systemd exposes `StartTransientUnit`, `GetUnit`, `StopUnit`, and `ResetFailedUnit` on `org.freedesktop.systemd1.Manager`. Unit objects expose generic Unit state and service-specific process-result properties. zbus provides `Connection::session()`, blocking proxies, typed method calls, and D-Bus property reads, so it can implement every frozen function. Implementing both transports would create the second adapter the freeze explicitly does not call for, double failure handling and tests, and create pressure for the forbidden trait. [systemd D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) [zbus blocking connection](https://docs.rs/zbus/latest/zbus/blocking/connection/struct.Connection.html) [zbus blocking proxy](https://docs.rs/zbus/latest/zbus/blocking/proxy/struct.Proxy.html)
 
@@ -19,9 +21,9 @@ Use **only `systemd-run` plus `systemctl --user` in v1**. Do not add `zbus`, do 
 
 5. **Use monotonic start time for Reconcile.** Request `ExecMainStartTimestampMonotonic`, an integer number of microseconds, rather than parsing the locale-formatted `ExecMainStartTimestamp`. A zero value means unknown/not started. Compare it with the caller's monotonic observation time and pass an age/timestamp representation into the frozen pure Reconcile input. This avoids wall-clock jumps and locale parsing. The service D-Bus interface defines both real-time and monotonic start timestamps as `t` (`u64`). [systemd D-Bus API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) [systemd time units](https://www.freedesktop.org/software/systemd/man/latest/systemd.time.html)
 
-## Exact v1 argv
+## Discarded v1 argv (not the adapter)
 
-The following are argument vectors, not shell strings. `UNIT`, paths, environment values, proxy flags, and the instance name are separate arguments.
+Kept so implementers can see the subprocess alternative. **Do not call these from `supervisor`.** The following are argument vectors, not shell strings.
 
 ### `show(unit) -> Result<UnitSnapshot>`
 
@@ -112,9 +114,9 @@ systemctl --user --no-pager --property=Version --value show
 
 With no unit argument, `show` reads manager properties. Require status 0 and a nonempty Version value. This one probe verifies all v1 prerequisites relevant to this adapter: `systemctl` can execute, the user bus is reachable, and `org.freedesktop.systemd1` answers. Preserve a bounded stderr excerpt in doctor detail and use the already-frozen doctor hint policy. Do not classify a reachable but globally `degraded` user manager as unavailable.
 
-## Equivalent zbus coverage (not recommended for v1)
+## v1 D-Bus calls (normative)
 
-This proves that zbus is capable; it is **not** a proposal to implement a second path.
+This is the adapter. Do not also spawn `systemctl` / `systemd-run`.
 
 Common connection and manager proxy:
 
@@ -160,7 +162,7 @@ org.freedesktop.systemd1.Service:
   ExecMainStartTimestampMonotonic t
 ```
 
-The D-Bus path avoids PATH lookup for `systemctl`/`systemd-run`, subprocess startup, text parsing, and lossy stderr classification. Its v1 costs are zbus plus transitive/default async-I/O features, blocking-runtime behavior, D-Bus `Variant`/`OwnedValue` conversion for `a(sv)` and `a(sasb)`, two interface property maps, and D-Bus-specific error mapping. Those costs are justified only if measurements or platform requirements later show the argv adapter is inadequate.
+The D-Bus path avoids PATH lookup for `systemctl`/`systemd-run`, subprocess startup, text parsing, and lossy stderr classification. v1 costs are zbus plus transitive/default async-I/O features, blocking-runtime behavior, D-Bus `Variant`/`OwnedValue` conversion for `a(sv)` and `a(sasb)`, two interface property maps, and D-Bus-specific error mapping. Those costs are accepted for v1.
 
 ## Failure classification
 
@@ -189,63 +191,10 @@ The D-Bus path avoids PATH lookup for `systemctl`/`systemd-run`, subprocess star
 
 ## Gaps and residual risks
 
-1. **Live Omarchy smoke test remains required.** Verify exact stdout/stderr and exit statuses for: absent transient unit, bad proxy binary under `Type=exec`, SIGTERM clean stop fields, down user bus, and post-stop `reset-failed` on the target systemd version.
-2. **Tool presence is a runtime prerequisite.** The recommendation assumes `systemd-run` and `systemctl` ship with the target systemd installation. Doctor must report a missing executable clearly.
+1. **Live Omarchy smoke test remains required.** Verify D-Bus behavior for: absent transient unit, bad proxy binary under `Type=exec`, SIGTERM clean stop fields, down user bus, and post-stop `reset-failed` on the target systemd version.
+2. **User bus is a runtime prerequisite.** Doctor `systemd_user` must fail clearly when the session bus or user manager is down. Do not require `systemctl` / `systemd-run` on `PATH` for the adapter (journal still uses `journalctl`).
 3. **`ExecMainCode` constants should be named/tested against libc SIGCHLD semantics.** At minimum test exited (`CLD_EXITED`), killed (`CLD_KILLED`), dumped (`CLD_DUMPED`), and zero/no-result; never interpret status `15` without the code/result discriminator.
-4. **No repository/git/GitHub mutation was performed in this research-agent environment.** The parent must place this content at `docs/research/supervisor-io.md`, create/push `research/supervisor-io` from refreshed `origin/main`, commit it, and comment on issue #31 with the gist and blob URL without closing or merging the issue.
 
 ## Decision gist for issue #31
 
-**Use one concrete argv adapter in v1: `systemd-run --user` for transient starts and `systemctl --user show/stop/reset-failed` for observation and lifecycle. zbus can cover every call, but defer it unless the subprocess adapter proves inadequate; do not ship both and do not add `trait Supervisor`.**
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Concrete recommendation, exact argv and equivalent zbus calls, property-to-UnitSnapshot mapping, and severity-tagged review findings are documented in /tmp/wayfinder-impl/out-supervisor-io.md for proposed repo path docs/research/supervisor-io.md."
-    }
-  ],
-  "changedFiles": [
-    "/tmp/wayfinder-impl/out-supervisor-io.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "gh issue view 31",
-      "result": "not-run",
-      "summary": "No shell/gh tool was available; the complete issue body was fetched from its GitHub URL instead."
-    },
-    {
-      "command": "live systemd-run/systemctl smoke test",
-      "result": "not-run",
-      "summary": "No shell tool or target Omarchy user-manager session was available."
-    },
-    {
-      "command": "git branch/commit/push and gh issue comment",
-      "result": "not-run",
-      "summary": "Repository and GitHub mutation are left to the parent session; this child wrote only the authoritative runtime output file."
-    }
-  ],
-  "validationOutput": [
-    "Read docs/modules.v1.md supervisor section, docs/research/systemd-user-units.md, docs/reconcile.v1.md, Cargo.toml, and the full issue #31 body.",
-    "Cross-checked the recommendation against primary systemd systemctl/systemd-run/D-Bus documentation and first-party zbus blocking API/features documentation.",
-    "Verified the proposed show property set covers load/presence, ActiveState/SubState, MainPID, Result, exit-vs-signal interpretation, and monotonic start age required by frozen Reconcile."
-  ],
-  "residualRisks": [
-    "medium: docs/research/supervisor-io.md (proposed) - exact command behavior still needs a live Omarchy/systemd smoke test for not-found, bad exec, SIGTERM, and down-bus cases.",
-    "low: src/supervisor.rs (future implementation) - ExecMainCode must gate interpretation of ExecMainStatus so exit 15 and signal 15 are not conflated.",
-    "operational: branch creation, commit, push, and issue #31 comment were not performed by this research child."
-  ],
-  "noStagedFiles": false,
-  "diffSummary": "One research artifact recommends the single v1 argv adapter, specifies all supervisor commands/properties, proves zbus coverage, and records failure handling and residual validation risks.",
-  "reviewFindings": [
-    "no blocker: docs/modules.v1.md - the recommended single concrete argv adapter respects the frozen seam and no-trait rule.",
-    "important: docs/research/supervisor-io.md (proposed) - implementation must parse LoadState rather than command exit status to detect a missing unit.",
-    "important: src/supervisor.rs (future) - use ExecMainStartTimestampMonotonic and interpret ExecMainStatus only with ExecMainCode/Result.",
-    "minor: Cargo.toml - choosing argv avoids adding zbus's blocking/async-I/O dependency surface in v1."
-  ],
-  "manualNotes": "The parent should persist this artifact as docs/research/supervisor-io.md, perform the required git/GitHub operations, and retain the issue as open."
-}
-```
+**Use one concrete zbus adapter in v1** (user/session bus: `StartTransientUnit`, `GetUnit` + properties, `StopUnit`, `ResetFailedUnit`, manager `Version`). Do not shell out to `systemd-run`/`systemctl`. Do not ship both. Do not add `trait Supervisor`.
