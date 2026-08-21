@@ -111,7 +111,7 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - Stateless CLI; long-lived work is `cloud-sql-proxy` under `systemd --user`.
 - ADC is a hard requirement ([ADR 0002](./docs/adr/0002-adc-only-auth.md)).
 - v1 health = **our Unit** + local TCP accept; no Orphan adopt ([ADR 0003](./docs/adr/0003-local-health-signals.md), [`reconcile.v1.md`](./docs/reconcile.v1.md)).
-- Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)).
+- Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)). v1 Supervisor I/O is **zbus** on the user bus ([`docs/research/supervisor-io.md`](./docs/research/supervisor-io.md)) — not `systemctl` / `systemd-run`. `logs` still uses `journalctl`.
 - Module seams: [`docs/modules.v1.md`](./docs/modules.v1.md) — clap stays in `cli`; Reconcile is pure; no traits until a second adapter exists.
 - Test / dogfood: [`docs/verification.v1.md`](./docs/verification.v1.md) — required `cargo test` list + human dogfood; implementation map inherits this; do not close [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) on golden-only.
 
