@@ -3,8 +3,8 @@
 
 [tools]
 rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
-hk = "1.56.0"
-"pipx:check-jsonschema" = "0.38.0"
+hk = "1.56.0" # same as hk.pkl amends / min_hk_version
+"pipx:check-jsonschema" = "0.38.0" # same as CI pip install
 
 [env]
 HK_MISE = "1"

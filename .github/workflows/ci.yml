@@ -18,7 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@master
+      # Pin the action SHA; toolchain version is RUST_VERSION (same as mise.toml / Cargo.toml).
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
@@ -44,6 +45,7 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Same version as mise.toml pipx:check-jsonschema.
       - name: Install check-jsonschema
         run: pip install check-jsonschema==0.38.0
 

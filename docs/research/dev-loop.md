@@ -89,7 +89,7 @@ ADR 0004 requires modern stable Rust **and** an explicit MSRV. Implement that as
 - use that exact version in CI, not the moving string `stable`;
 - upgrade deliberately in a small PR when a newer compiler is needed.
 
-The repository currently says `rust-version = "1.85"`. The implementation ticket should either keep `1.85` everywhere or deliberately update it everywhere after verifying dependencies and tests; it must not leave Cargo, mise, and CI on different versions. A separate floating-stable CI lane is unnecessary for this application CLI unless the project later chooses to test future compiler compatibility.
+The repository now pins `rust-version = "1.97.1"` in `Cargo.toml`, `mise.toml`, and CI together. Upgrade that number deliberately in a small PR; do not leave Cargo, mise, and CI on different versions. A separate floating-stable CI lane is unnecessary for this application CLI unless the project later chooses to test future compiler compatibility.
 
 ### Issue #23 Layer 1: script called locally and by the same workflow
 

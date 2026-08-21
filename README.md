@@ -12,7 +12,7 @@ cloud-sql-tracker stop --group backend
 
 ## Status
 
-**Contracts locked.** Implementation map in progress. Binary still a stub (`0.1.0` in `Cargo.toml` only — single version source).
+**Contracts locking via PRs.** Binary still a stub (`0.1.0` in `Cargo.toml` only — single version source).
 
 ## Develop
 
