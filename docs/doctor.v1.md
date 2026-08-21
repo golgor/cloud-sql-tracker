@@ -225,6 +225,6 @@ WARN  ports — fe-dev:15434 held by cloud-sql-proxy (pid 12002)
 
 1. Shared `load_config` / validate used by doctor check and by other commands.  
 2. Doctor subcommand entry does not `exit 2` solely because config invalid.  
-3. Table-driven tests for `ok` aggregation and ADC path priority (GAC vs default file).  
+3. Table-driven tests for `ok` aggregation and ADC path priority (`GOOGLE_APPLICATION_CREDENTIALS` vs default ADC file).  
 4. Golden `examples/doctor.v1.json` validates against `schemas/doctor.v1.json`.  
 5. Hints for ADC include the Google ADC documentation URL.
