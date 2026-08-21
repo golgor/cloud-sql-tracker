@@ -634,16 +634,36 @@ fn is_stopped(row: &StatusRow) -> bool {
     row.state == HealthState::Stopped
 }
 
-/// A reconciled row's own `error` is already stable — every `error.code`
-/// `reconcile`/`status::observe_and_reconcile` can produce
-/// (`port_in_use`, `start_timeout`, `unit_failed`, `exec_failed`,
-/// `config`) is a terminal classification of the current observation, not
-/// a transient one more polling will resolve (`docs/reconcile.v1.md`,
-/// "Error codes produced by Reconcile"). Reporting it immediately keeps
-/// the real cause visible instead of a generic "did not confirm" timeout
-/// once `wait_ms` elapses.
-fn terminal_error_result(row: &StatusRow) -> Option<TargetResult> {
+/// Whether a start-wait poll should give up immediately on this row's
+/// `error`, without consuming the rest of `--wait-ms`.
+///
+/// **Permanent** for this attempt: foreign port holder, exec failure, auth,
+/// config. More polling will not open *our* port.
+///
+/// **Not permanent:** `start_timeout` / `unit_failed` from Reconcile's start
+/// window. Those mean "not running *yet*" on a single observation
+/// (often `activating` + closed port, or missing `started_at` treated as
+/// outside the window — see `within_start_window`). The CLI's `--wait-ms`
+/// budget is separate from Reconcile's 10s status window; keep polling
+/// until the port is open or the operator budget ends.
+fn is_permanent_start_failure(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::PortInUse
+            | ErrorCode::ExecFailed
+            | ErrorCode::Auth
+            | ErrorCode::Config
+            | ErrorCode::BinMissing
+    )
+}
+
+/// Immediate failure for a start-wait poll, or `None` to keep waiting /
+/// fall through to the deadline.
+fn permanent_start_failure(row: &StatusRow) -> Option<TargetResult> {
     let error = row.error.as_ref()?;
+    if !is_permanent_start_failure(error.code) {
+        return None;
+    }
     Some(TargetResult::Failed {
         code: error.code,
         message: error.detail.clone(),
@@ -665,10 +685,18 @@ fn wait_step(
     if is_done(row) {
         return Some(TargetResult::Succeeded);
     }
-    if let Some(result) = terminal_error_result(row) {
+    if let Some(result) = permanent_start_failure(row) {
         return Some(result);
     }
     if remaining.is_zero() {
+        // Prefer the last observation's error (e.g. start_timeout detail)
+        // over a generic "did not confirm" when Reconcile already explained.
+        if let Some(error) = row.error.as_ref() {
+            return Some(TargetResult::Failed {
+                code: error.code,
+                message: error.detail.clone(),
+            });
+        }
         return Some(TargetResult::Failed {
             code: timeout_code,
             message: format!("connection `{id}` did not confirm within {wait_ms}ms"),
@@ -1222,13 +1250,13 @@ mod tests {
     // -- terminal_error_result --------------------------------------------
 
     #[test]
-    fn terminal_error_result_is_none_for_a_healthy_row() {
+    fn permanent_start_failure_is_none_for_a_healthy_row() {
         let row = row(HealthState::Running, Source::Unit, None);
-        assert_eq!(terminal_error_result(&row), None);
+        assert_eq!(permanent_start_failure(&row), None);
     }
 
     #[test]
-    fn terminal_error_result_surfaces_the_rows_own_code_and_detail() {
+    fn permanent_start_failure_surfaces_port_in_use() {
         let row = row(
             HealthState::Error,
             Source::None,
@@ -1238,12 +1266,27 @@ mod tests {
             }),
         );
         assert_eq!(
-            terminal_error_result(&row),
+            permanent_start_failure(&row),
             Some(TargetResult::Failed {
                 code: ErrorCode::PortInUse,
                 message: "held by pid 999".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn permanent_start_failure_ignores_start_timeout() {
+        // Reconcile's start window is not the CLI wait budget. A mid-start
+        // observation of start_timeout must not abort `--wait-ms`.
+        let row = row(
+            HealthState::Error,
+            Source::Unit,
+            Some(StatusError {
+                code: ErrorCode::StartTimeout,
+                detail: "unit is still activating after the start window".to_string(),
+            }),
+        );
+        assert_eq!(permanent_start_failure(&row), None);
     }
 
     // -- wait_step (pure wait/timeout decision) -----------------------------
@@ -1263,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_step_short_circuits_on_a_terminal_error_even_with_time_remaining() {
+    fn wait_step_short_circuits_on_port_in_use_even_with_time_remaining() {
         // A fresh `port_in_use` will not resolve itself by waiting longer
         // — report it now instead of polling until `wait_ms` elapses.
         let row = row(
@@ -1289,6 +1332,31 @@ mod tests {
                 message: "held by pid 999".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn wait_step_keeps_waiting_on_start_timeout_while_time_remains() {
+        // Dogfood: restart/start can observe Reconcile start_timeout on the
+        // first poll (activating + port not open yet / missing started_at)
+        // while the proxy is about to listen within ~1s. Must not fail in
+        // ~200ms with exit 4.
+        let row = row(
+            HealthState::Error,
+            Source::Unit,
+            Some(StatusError {
+                code: ErrorCode::StartTimeout,
+                detail: "unit is still activating after the start window".to_string(),
+            }),
+        );
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::from_secs(5),
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(result, None);
     }
 
     #[test]
@@ -1321,6 +1389,33 @@ mod tests {
             Some(TargetResult::Failed {
                 code: ErrorCode::StartTimeout,
                 message: "connection `a` did not confirm within 10000ms".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn wait_step_on_deadline_prefers_the_rows_start_timeout_detail() {
+        let row = row(
+            HealthState::Error,
+            Source::Unit,
+            Some(StatusError {
+                code: ErrorCode::StartTimeout,
+                detail: "unit is still activating after the start window".to_string(),
+            }),
+        );
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::ZERO,
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(
+            result,
+            Some(TargetResult::Failed {
+                code: ErrorCode::StartTimeout,
+                message: "unit is still activating after the start window".to_string(),
             })
         );
     }
