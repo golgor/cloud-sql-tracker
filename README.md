@@ -14,6 +14,19 @@ cloud-sql-tracker stop --group backend
 
 **Contracts locking via PRs.** Binary still a stub (`0.1.0` in `Cargo.toml` only — single version source).
 
+## Develop
+
+Needs [mise](https://mise.jdx.dev/). Pin is Rust **1.97.1** (same number in `mise.toml`, `Cargo.toml` `rust-version`, and CI).
+
+```bash
+mise install          # rust + rustfmt + clippy, hk, check-jsonschema; installs git hooks
+mise run check        # fmt-check, clippy, cargo test, Layer 1 contracts
+mise run fmt          # cargo fmt
+mise run test         # cargo test (never --include-ignored)
+```
+
+Focused Cargo commands stay valid (`cargo test reconcile`). Prefer `mise run …` for the full gate so tool versions match. Hooks: `hk install --mise` (also the mise `postinstall` hook). Pre-commit formats Rust. Pre-push runs the same checks as CI.
+
 | | |
 |--|--|
 | Design | [docs/DESIGN.md](docs/DESIGN.md) |

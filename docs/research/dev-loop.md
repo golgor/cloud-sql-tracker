@@ -10,7 +10,7 @@ Use **mise as the documented local entry point**, but keep every task a thin, vi
 
 Pin one numbered Rust toolchain and set the same number as `package.rust-version`. Validate issue #23 Layer 1 through a small repository script invoked both by mise and the same CI workflow, so the schema/golden pair list has one source of truth.
 
-**Snapshot, not a second pin.** Toolchain numbers in this brief (e.g. current `rust-version = "1.85"`) are what we looked up when researching. When [Land toolchain, hk, and GitHub Actions](https://github.com/golgor/cloud-sql-tracker/issues/34) lands, pin the then-current stable in `mise.toml`, `Cargo.toml`, and CI **together**, and edit this file if the number moved. Revisit if those three and this brief disagree.
+**Snapshot, not a second pin.** Toolchain numbers in this brief were a research-time lookup. [Land toolchain, hk, and GitHub Actions](https://github.com/golgor/cloud-sql-tracker/issues/34) pins **1.97.1** in `mise.toml`, `Cargo.toml` `rust-version`, and CI together. Revisit if those three and this brief disagree.
 
 ## Evidence
 
@@ -89,7 +89,7 @@ ADR 0004 requires modern stable Rust **and** an explicit MSRV. Implement that as
 - use that exact version in CI, not the moving string `stable`;
 - upgrade deliberately in a small PR when a newer compiler is needed.
 
-The repository currently says `rust-version = "1.85"`. The implementation ticket should either keep `1.85` everywhere or deliberately update it everywhere after verifying dependencies and tests; it must not leave Cargo, mise, and CI on different versions. A separate floating-stable CI lane is unnecessary for this application CLI unless the project later chooses to test future compiler compatibility.
+The repository now pins `rust-version = "1.97.1"` in `Cargo.toml`, `mise.toml`, and CI together. Upgrade that number deliberately in a small PR; do not leave Cargo, mise, and CI on different versions. A separate floating-stable CI lane is unnecessary for this application CLI unless the project later chooses to test future compiler compatibility.
 
 ### Issue #23 Layer 1: script called locally and by the same workflow
 
