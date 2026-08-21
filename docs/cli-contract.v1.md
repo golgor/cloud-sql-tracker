@@ -173,9 +173,9 @@ cloud-sql-tracker doctor [--json]
 ```
 
 - Always runs full environment/config checks (no target selector).
-- `--json`: machine-readable object — **shape frozen on doctor ticket (#11)**, not here.
-- Without `--json`: human checklist.
-- Exit: `0` if no hard failures; `2` usage; `3` if doctor itself cannot run or reports hard dependency failure (exact check list on #11).
+- `--json`: one **Doctor report** on stdout — contract: [`doctor.v1.md`](./doctor.v1.md), [`schemas/doctor.v1.json`](../schemas/doctor.v1.json).
+- Without `--json`: human checklist (same checks).
+- Exit: `0` if no hard failures (`ok: true`, warns allowed); `2` usage only; `3` if any check fails (`status: "fail"`, including invalid config discovered *as* the `config` check). Doctor does **not** fail-fast on bad config before the checklist — see doctor.v1.md.
 
 ---
 

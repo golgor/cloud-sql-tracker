@@ -27,7 +27,7 @@ This is **not** a config file, not a log stream, and not a doctor report.
 ```
 status --json  →  Status document (this schema)
 config file    →  connections.json (separate schema; not this document)
-doctor --json  →  may reuse error shapes later; not required to be a Status document
+doctor --json  →  Doctor report (separate schema; see [`doctor.v1.md`](./doctor.v1.md))
 ```
 
 ---
