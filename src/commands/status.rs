@@ -61,12 +61,11 @@ pub(crate) enum StatusCommandError {
 /// `Selector::All` — that default lives in `cli` (#45), not here
 /// (`docs/cli-contract.v1.md`, "Defaults").
 ///
-/// Only reachable from `cli` (#45) so far — this ticket
-/// ([#42](https://github.com/golgor/cloud-sql-tracker/issues/42)) proves
+/// Called by `cli`'s `status` subcommand (#45). This ticket
+/// ([#42](https://github.com/golgor/cloud-sql-tracker/issues/42)) proved
 /// the composition through this module's own unit tests instead (real
 /// `supervisor`/`port` I/O needs a live systemd user session, which
 /// `docs/verification.v1.md` does not require as a unit test).
-#[allow(dead_code)]
 pub(crate) fn status(
     config: &Config,
     selector: &Selector,

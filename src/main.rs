@@ -2,15 +2,12 @@
 //!
 //! This binary does **not** implement the Cloud SQL tunnel. It starts, stops,
 //! and reports on Google's `cloud-sql-proxy`, driven by a user config file and
-//! (planned) systemd --user transient units.
+//! systemd --user transient units.
 //!
-//! See README.md and docs/DESIGN.md.
+//! See README.md and docs/DESIGN.md. Behavior lives in the library crate
+//! (`src/lib.rs`); this binary is only `exit(cli::run())`
+//! (`docs/modules.v1.md`, "`cli` — thin shell (clap)").
 
 fn main() {
-    eprintln!(
-        "cloud-sql-tracker {}: scaffold only — not implemented yet.\n\
-         See https://github.com/golgor/cloud-sql-tracker",
-        env!("CARGO_PKG_VERSION")
-    );
-    std::process::exit(2);
+    std::process::exit(cloud_sql_tracker::cli::run());
 }

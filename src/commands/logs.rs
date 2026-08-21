@@ -33,13 +33,12 @@ pub(crate) enum LogsCommandError {
 /// a bad `--lines` is a usage error (exit `2`) `cli` must reject before
 /// calling this function, not a rule this module re-checks.
 ///
-/// Only reachable from `cli` (#45) so far — this ticket
-/// ([#44](https://github.com/golgor/cloud-sql-tracker/issues/44)) proves
+/// Called by `cli`'s `logs` subcommand (#45). This ticket
+/// ([#44](https://github.com/golgor/cloud-sql-tracker/issues/44)) proved
 /// [`resolve_unit`]'s id-to-unit resolution through this module's own unit
 /// tests; a successful [`journal::dump`] call needs a real `journalctl`
 /// binary, which `docs/verification.v1.md` does not require as a unit test
 /// (the same allowance already used for `journal`'s own adapter tests).
-#[allow(dead_code)]
 pub(crate) fn logs(config: &Config, id: &str, lines: u32) -> Result<Dump, LogsCommandError> {
     let unit = resolve_unit(config, id)?;
     Ok(journal::dump(&unit, lines)?)
