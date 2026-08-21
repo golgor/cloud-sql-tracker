@@ -10,7 +10,7 @@ Use **mise as the documented local entry point**, but keep every task a thin, vi
 
 Pin one numbered Rust toolchain and set the same number as `package.rust-version`. Validate issue #23 Layer 1 through a small repository script invoked both by mise and the same CI workflow, so the schema/golden pair list has one source of truth.
 
-**Snapshot, not a second pin.** Toolchain numbers in this brief (e.g. current `rust-version = "1.85"`) are what we looked up when researching. When [Land toolchain, hk, and GitHub Actions](https://github.com/golgor/cloud-sql-tracker/issues/34) lands, pin the then-current stable in `mise.toml`, `Cargo.toml`, and CI **together**, and edit this file if the number moved. Revisit if those three and this brief disagree.
+**Snapshot, not a second pin.** Toolchain numbers in this brief were a research-time lookup. [Land toolchain, hk, and GitHub Actions](https://github.com/golgor/cloud-sql-tracker/issues/34) pins **1.97.1** in `mise.toml`, `Cargo.toml` `rust-version`, and CI together. Revisit if those three and this brief disagree.
 
 ## Evidence
 

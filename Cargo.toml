@@ -2,7 +2,7 @@
 name = "cloud-sql-tracker"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.97.1"
 description = "Control plane for multiple Google Cloud SQL Auth Proxy processes"
 license = "MIT"
 repository = "https://github.com/golgor/cloud-sql-tracker"

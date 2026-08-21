@@ -1,0 +1,33 @@
+amends "package://github.com/jdx/hk/releases/download/v1.56.0/hk@1.56.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.56.0/hk@1.56.0#/Builtins.pkl"
+
+min_hk_version = "1.56.0"
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps {
+      ["cargo-fmt"] = Builtins.cargo_fmt
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["fmt-check"] {
+        check = "mise run fmt-check"
+      }
+      ["lint"] {
+        check = "mise run lint"
+        depends = "fmt-check"
+      }
+      ["test"] {
+        check = "mise run test"
+        depends = "lint"
+      }
+      ["contracts"] {
+        check = "mise run contracts"
+        depends = "test"
+      }
+    }
+  }
+}

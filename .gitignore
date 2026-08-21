@@ -9,3 +9,8 @@
 
 # Local session handoff (do not commit)
 HANDOFF.md
+
+# hk local overrides
+hk.local.pkl
+.config/hk.local.pkl
+

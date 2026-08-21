@@ -1,0 +1,42 @@
+# Tool versions and thin task wrappers. Commands stay ordinary cargo / scripts.
+# Rust 1.97.1 is the pin for mise, Cargo.toml rust-version, and CI together.
+
+[tools]
+rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
+hk = "1.56.0"
+"pipx:check-jsonschema" = "0.38.0"
+
+[env]
+HK_MISE = "1"
+
+[hooks]
+postinstall = "hk install --mise"
+
+[tasks.fmt]
+description = "Format Rust sources"
+run = "cargo fmt"
+
+[tasks.fmt-check]
+description = "Check Rust formatting (non-mutating)"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Default cargo test (never --include-ignored)"
+run = "cargo test"
+
+[tasks.contracts]
+description = "Layer 1: goldens vs JSON Schemas"
+run = "scripts/validate-contracts.sh"
+
+[tasks.check]
+description = "Full local gate (matches CI)"
+run = [
+  "mise run fmt-check",
+  "mise run lint",
+  "mise run test",
+  "mise run contracts",
+]
