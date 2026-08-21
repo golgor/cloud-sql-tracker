@@ -30,6 +30,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`examples/doctor.v1.json`](./examples/doctor.v1.json) | Golden doctor snapshot |
 | [`docs/logs.v1.md`](./docs/logs.v1.md) | **`logs` subcommand** (journalctl dump UX) |
 | [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
+| [`docs/modules.v1.md`](./docs/modules.v1.md) | **Rust module seams** (`src/` layout, pure vs I/O) |
 | [`docs/research/`](./docs/research/) | systemd / port / journal research |
 
 ## Contract artifacts (keep in sync)
@@ -40,7 +41,7 @@ Frozen product surfaces use a small artifact set. **Same PR** must update every 
 |------|------|-----------|
 | **JSON contract** | Machine JSON in or out (`status --json`, `doctor --json`, `connections.json`) | **Prose** (`docs/…v1.md`) + **JSON Schema** (`schemas/…`) + **golden example** (`examples/…json`) |
 | **Plain-text / argv UX** | Human stdout or argv-only (`logs`, much of CLI contract) | **Prose** + **golden sample** when useful (e.g. `examples/logs.v1.txt`) — **no** JSON Schema |
-| **Rules / tables** | Pure decision tables (`reconcile`) | **Prose** (normative tables); schema only if a JSON document is defined |
+| **Rules / tables** | Pure decision tables (`reconcile`, module seams) | **Prose** (normative tables); schema only if a JSON document is defined |
 
 ### Current JSON trios
 
@@ -91,6 +92,7 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - ADC is a hard requirement ([ADR 0002](./docs/adr/0002-adc-only-auth.md)).
 - v1 health = **our Unit** + local TCP accept; no Orphan adopt ([ADR 0003](./docs/adr/0003-local-health-signals.md), [`reconcile.v1.md`](./docs/reconcile.v1.md)).
 - Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)).
+- Module seams: [`docs/modules.v1.md`](./docs/modules.v1.md) — clap stays in `cli`; Reconcile is pure; no traits until a second adapter exists.
 
 ## Wayfinder
 

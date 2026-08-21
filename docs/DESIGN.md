@@ -25,7 +25,7 @@ cloud-sql-tracker   (this repo — stateless CLI)
 - **Control plane:** this CLI — config, lifecycle, health aggregation, stable JSON.
 - **View:** separate repo `cloud-sql-tracker-oma-plugin` — Omarchy bar only; no direct filesystem access to config.
 
-The CLI is **stateless and short-lived**: each invocation does one job and exits. Long-lived processes are only the proxies (under systemd user units).
+The CLI is **stateless and short-lived**: each invocation does one job and exits. Long-lived processes are only the proxies (under systemd user units). Rust module seams (pure Reconcile vs I/O adapters vs thin clap `cli`): [`docs/modules.v1.md`](./modules.v1.md).
 
 ## Companion plugin
 
