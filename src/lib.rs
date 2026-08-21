@@ -4,3 +4,4 @@
 //! See `docs/modules.v1.md` for the frozen module seams.
 
 mod model;
+mod reconcile;
