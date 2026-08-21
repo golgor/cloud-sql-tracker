@@ -21,10 +21,10 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::config::Config;
 use crate::env;
 use crate::model::{self, Connection, ErrorCode, HealthState, Source, StatusRow};
-use crate::supervisor;
+use crate::supervisor::{self, SupervisorError};
 
 use super::select::{self, SelectError, Selector};
-use super::status;
+use super::status::{self, StatusCommandError};
 
 // ---------------------------------------------------------------------------
 // Outcomes.
@@ -57,6 +57,15 @@ pub(crate) enum TargetResult {
     /// command's failures read the same vocabulary as `status`; `message`
     /// is a human-readable summary for stderr.
     Failed { code: ErrorCode, message: String },
+    /// Could not even reach the systemd user bus for this id
+    /// (`docs/cli-contract.v1.md`, "Exit code table": exit `3`,
+    /// "Dependency": "no systemd user bus"). Kept separate from
+    /// [`TargetResult::Failed`] instead of reusing `ErrorCode::Unknown`
+    /// so `cli` (#45) can tell an environmental failure from a
+    /// per-Connection one and "prefer `3` when failure is environmental
+    /// rather than per-id" — this is a `commands`-internal signal, not a
+    /// Status document `error.code`, so it needs no schema change.
+    Dependency { message: String },
 }
 
 /// One Connection id plus its [`TargetResult`], in selector order.
@@ -82,33 +91,58 @@ pub(crate) struct BatchOutcome {
 }
 
 impl BatchOutcome {
-    /// [`TargetResult::Succeeded`] or [`TargetResult::SkippedDisabled`] —
-    /// everything that is not a failure or a usage-class refusal.
-    ///
-    /// Only reachable from `cli` (#45) so far, which will use these two
-    /// counts to choose between exit `0`/`1`/`4`
-    /// (`docs/cli-contract.v1.md`, "Exit code table").
+    /// Only [`TargetResult::Succeeded`] — a skip is neither a success nor
+    /// a failure, so it is **not** folded in here. Counting
+    /// [`TargetResult::SkippedDisabled`] as a success would make `cli`'s
+    /// (#45) "every attempted target failed" exit `4`
+    /// (`docs/cli-contract.v1.md`, "Exit code table") unreachable whenever
+    /// a disabled id happened to be skipped alongside every enabled id
+    /// failing.
     #[allow(dead_code)]
     pub(crate) fn succeeded_count(&self) -> usize {
         self.targets
             .iter()
-            .filter(|target| {
-                matches!(
-                    target.result,
-                    TargetResult::Succeeded | TargetResult::SkippedDisabled
-                )
-            })
+            .filter(|target| target.result == TargetResult::Succeeded)
             .count()
     }
 
-    /// Only [`TargetResult::Failed`] — [`TargetResult::RefusedDisabled`] is
-    /// a usage error (`docs/cli-contract.v1.md`, "Exit code table": exit
-    /// `2`), not a batch failure contribution (exit `1`/`4`).
+    /// [`TargetResult::SkippedDisabled`] only (`docs/config.v1.md`,
+    /// "`enabled: false`": skipped ids "do not by themselves force exit
+    /// `1`/`4`"). `cli` (#45) needs this separated from
+    /// [`succeeded_count`](Self::succeeded_count) to apply that rule
+    /// without a skip masquerading as a success.
+    #[allow(dead_code)]
+    pub(crate) fn skipped_count(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|target| matches!(target.result, TargetResult::SkippedDisabled))
+            .count()
+    }
+
+    /// Per-Connection operation failures only.
+    /// [`TargetResult::RefusedDisabled`] is a usage error
+    /// (`docs/cli-contract.v1.md`, "Exit code table": exit `2`), not a
+    /// batch failure contribution (exit `1`/`4`), and
+    /// [`TargetResult::Dependency`] is counted separately by
+    /// [`dependency_count`](Self::dependency_count) so `cli` can prefer
+    /// exit `3` when every failure is environmental.
     #[allow(dead_code)]
     pub(crate) fn failed_count(&self) -> usize {
         self.targets
             .iter()
             .filter(|target| matches!(target.result, TargetResult::Failed { .. }))
+            .count()
+    }
+
+    /// [`TargetResult::Dependency`] only — an environmental failure such as
+    /// an unreachable systemd user bus (`docs/cli-contract.v1.md`, "Exit
+    /// code table": exit `3`, "Prefer `3` when failure is environmental
+    /// rather than per-id").
+    #[allow(dead_code)]
+    pub(crate) fn dependency_count(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|target| matches!(target.result, TargetResult::Dependency { .. }))
             .count()
     }
 }
@@ -136,7 +170,7 @@ fn disabled_policy(connection: &Connection, single_target: bool) -> Option<Targe
 /// (`docs/cli-contract.v1.md`, "`start`": "Idempotency"). `None` means
 /// "actually attempt to start this Connection".
 fn start_idempotent_or_conflict(row: &StatusRow) -> Option<TargetResult> {
-    if row.state == HealthState::Running && row.source == Source::Unit {
+    if is_running(row) {
         return Some(TargetResult::Succeeded);
     }
     if let Some(error) = &row.error {
@@ -157,7 +191,7 @@ fn start_idempotent_or_conflict(row: &StatusRow) -> Option<TargetResult> {
 /// "Idempotency: already `stopped` -> success no-op"). `None` means
 /// "actually attempt to stop this Connection".
 fn stop_idempotent(row: &StatusRow) -> Option<TargetResult> {
-    (row.state == HealthState::Stopped).then_some(TargetResult::Succeeded)
+    is_stopped(row).then_some(TargetResult::Succeeded)
 }
 
 // ---------------------------------------------------------------------------
@@ -218,10 +252,7 @@ fn try_start(connection: &Connection, config: &Config, wait_ms: u64) -> TargetRe
     };
 
     if let Err(err) = supervisor::start_transient(connection, &proxy_bin, &env_vars) {
-        return TargetResult::Failed {
-            code: ErrorCode::Unknown,
-            message: err.to_string(),
-        };
+        return supervisor_result(err);
     }
     wait_for(connection, wait_ms, is_running, ErrorCode::StartTimeout)
 }
@@ -321,12 +352,14 @@ fn try_stop(connection: &Connection, wait_ms: u64) -> TargetResult {
     // "supervisor": "stop(unit) -> Result<()>": "Our Unit only"). Best-effort
     // `reset-failed` after stop is `supervisor::stop`'s own job.
     if let Err(err) = supervisor::stop(&unit) {
-        return TargetResult::Failed {
-            code: ErrorCode::Unknown,
-            message: err.to_string(),
-        };
+        return supervisor_result(err);
     }
-    wait_for(connection, wait_ms, is_stopped, ErrorCode::Unknown)
+    wait_for(
+        connection,
+        wait_ms,
+        unit_no_longer_active,
+        ErrorCode::Unknown,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -384,22 +417,37 @@ fn restart_target(
 /// A Connection whose Health could not even be determined is reported as
 /// its own failure instead of being silently dropped from, or silently
 /// included in, the restart set.
+///
+/// The disabled policy is applied **before** the reconcile round trip, the
+/// same as every other entry point here (`docs/config.v1.md`, "`enabled:
+/// false`") — a disabled single id must be a usage refusal, never a
+/// filtered-away empty-success batch, and a disabled id in `--group`/
+/// `--all` is skipped without spending a D-Bus call + TCP probe on it.
+/// Outcomes are collected into index-aligned slots so the returned order
+/// always matches the selector's own order, even though disabled/gather-
+/// failed ids and the eventually-restarted ids are decided in separate
+/// passes.
 fn restart_failed_only(
     connections: Vec<&Connection>,
     config: &Config,
     wait_ms: u64,
     single_target: bool,
 ) -> Vec<TargetOutcome> {
-    let mut outcomes = Vec::new();
+    let mut slots: Vec<Option<TargetOutcome>> = vec![None; connections.len()];
     let mut rows = Vec::with_capacity(connections.len());
     let mut observed = Vec::with_capacity(connections.len());
-    for connection in connections {
+
+    for (index, connection) in connections.into_iter().enumerate() {
+        if let Some(result) = disabled_policy(connection, single_target) {
+            slots[index] = Some(outcome_for(&connection.id, result));
+            continue;
+        }
         match reconcile_now(connection) {
             Ok(row) => {
                 rows.push(row);
-                observed.push(connection);
+                observed.push((index, connection));
             }
-            Err(result) => outcomes.push(outcome_for(&connection.id, result)),
+            Err(result) => slots[index] = Some(outcome_for(&connection.id, result)),
         }
     }
 
@@ -407,12 +455,12 @@ fn restart_failed_only(
         .into_iter()
         .map(|row| row.id.as_str())
         .collect();
-    for connection in observed {
+    for (index, connection) in observed {
         if failed_ids.contains(connection.id.as_str()) {
-            outcomes.push(restart_target(connection, config, wait_ms, single_target));
+            slots[index] = Some(restart_target(connection, config, wait_ms, single_target));
         }
     }
-    outcomes
+    slots.into_iter().flatten().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -420,31 +468,123 @@ fn restart_failed_only(
 // ---------------------------------------------------------------------------
 
 /// One reconcile round trip via `status::observe_and_reconcile`, with any
-/// gather error already converted into a [`TargetResult::Failed`] so every
-/// caller here handles one error shape.
+/// gather error already converted into a classified [`TargetResult`] so
+/// every caller here handles one error shape.
 fn reconcile_now(connection: &Connection) -> Result<StatusRow, TargetResult> {
     let now = SystemTime::now();
     let mono_now_usec = status::monotonic_now_usec();
-    status::observe_and_reconcile(connection, now, mono_now_usec).map_err(|err| {
-        TargetResult::Failed {
+    status::observe_and_reconcile(connection, now, mono_now_usec).map_err(status_command_result)
+}
+
+/// Classifies a [`StatusCommandError`] into the [`TargetResult`] a
+/// mutating command reports. A [`SupervisorError::Bus`] failure inside it
+/// is the same environmental "no user systemd" condition
+/// `docs/cli-contract.v1.md`'s exit `3` describes
+/// ([`supervisor_result`]); every other case is a per-Connection
+/// operation failure.
+fn status_command_result(err: StatusCommandError) -> TargetResult {
+    match err {
+        StatusCommandError::Supervisor { source, .. } => supervisor_result(*source),
+        other => TargetResult::Failed {
             code: ErrorCode::Unknown,
-            message: err.to_string(),
-        }
-    })
+            message: other.to_string(),
+        },
+    }
+}
+
+/// Classifies a [`SupervisorError`] returned directly from
+/// `supervisor::start_transient`/`supervisor::stop` the same way
+/// [`status_command_result`] classifies one wrapped inside a
+/// [`StatusCommandError`] — one place decides "is this environmental".
+fn supervisor_result(err: SupervisorError) -> TargetResult {
+    let message = err.to_string();
+    match err {
+        SupervisorError::Bus(_) => TargetResult::Dependency { message },
+        _ => TargetResult::Failed {
+            code: ErrorCode::Unknown,
+            message,
+        },
+    }
 }
 
 fn is_running(row: &StatusRow) -> bool {
     row.state == HealthState::Running && row.source == Source::Unit
 }
 
+/// `stop`'s **pre-check** for "nothing to do" (`docs/cli-contract.v1.md`,
+/// "`stop`": "Idempotency: already `stopped` -> success no-op"). Narrower
+/// than [`unit_no_longer_active`] on purpose: a Connection whose Unit is
+/// still `active` (e.g. `error`/`port_in_use` from a listener PID that
+/// does not match `MainPID`, `docs/reconcile.v1.md`'s truth table) is
+/// **not** an idempotent no-op — `stop` still needs to attempt the real
+/// `supervisor::stop` call on our own Unit.
 fn is_stopped(row: &StatusRow) -> bool {
     row.state == HealthState::Stopped
 }
 
+/// `stop`'s wait-loop completion, once a real `supervisor::stop` call has
+/// been made. `stop` only stops **our** Unit — it does not SIGTERM/
+/// SIGKILL a Foreign process (`docs/reconcile.v1.md`, "Lifecycle (not pure
+/// Reconcile)") — so a Foreign holder that keeps the configured port open
+/// after our Unit is gone (`error`/`port_in_use`, `source: none`) is a
+/// separate, pre-existing condition `stop` cannot wait out; it still
+/// counts as `stop` having done its job. Per `docs/reconcile.v1.md`'s
+/// truth table, `running`/`starting` always pair with `source: unit`, so
+/// "our Unit is no longer active" reduces to "Health state is neither of
+/// those two".
+fn unit_no_longer_active(row: &StatusRow) -> bool {
+    !matches!(row.state, HealthState::Running | HealthState::Starting)
+}
+
+/// A reconciled row's own `error` is already stable — every `error.code`
+/// `reconcile`/`status::observe_and_reconcile` can produce
+/// (`port_in_use`, `start_timeout`, `unit_failed`, `exec_failed`,
+/// `config`) is a terminal classification of the current observation, not
+/// a transient one more polling will resolve (`docs/reconcile.v1.md`,
+/// "Error codes produced by Reconcile"). Reporting it immediately keeps
+/// the real cause visible instead of a generic "did not confirm" timeout
+/// once `wait_ms` elapses.
+fn terminal_error_result(row: &StatusRow) -> Option<TargetResult> {
+    let error = row.error.as_ref()?;
+    Some(TargetResult::Failed {
+        code: error.code,
+        message: error.detail.clone(),
+    })
+}
+
+/// One poll's outcome inside [`wait_for`]'s loop: keep waiting, or stop
+/// with a final [`TargetResult`]. Pure given its inputs — no I/O, no clock
+/// read — so this is the seam unit tests exercise directly instead of the
+/// real 200ms-interval sleep loop.
+fn wait_step(
+    row: &StatusRow,
+    is_done: &impl Fn(&StatusRow) -> bool,
+    remaining: Duration,
+    wait_ms: u64,
+    id: &str,
+    timeout_code: ErrorCode,
+) -> Option<TargetResult> {
+    if is_done(row) {
+        return Some(TargetResult::Succeeded);
+    }
+    if let Some(result) = terminal_error_result(row) {
+        return Some(result);
+    }
+    if remaining.is_zero() {
+        return Some(TargetResult::Failed {
+            code: timeout_code,
+            message: format!("connection `{id}` did not confirm within {wait_ms}ms"),
+        });
+    }
+    None
+}
+
 /// Poll `status::observe_and_reconcile` for up to `wait_ms` until
 /// `is_done` is true (`docs/cli-contract.v1.md`, "`start`": "`--wait-ms N`
-/// ... Default: 10000 (10s)"). `timeout_code` is the `error.code` a caller
-/// reports when the deadline passes first — `start_timeout` for `start`,
+/// ... Default: 10000 (10s)"), short-circuiting on a reconciled row that
+/// already carries a terminal `error` ([`terminal_error_result`]).
+/// `timeout_code` is the `error.code` a caller reports when the deadline
+/// passes first with no terminal error — `start_timeout` for `start`,
 /// `unknown` for `stop` (the Status document's catalog has no dedicated
 /// "did not confirm stopped" code).
 fn wait_for(
@@ -457,20 +597,20 @@ fn wait_for(
     let deadline = Instant::now() + Duration::from_millis(wait_ms);
 
     loop {
-        match reconcile_now(connection) {
-            Ok(row) if is_done(&row) => return TargetResult::Succeeded,
-            Ok(_) => {}
+        let row = match reconcile_now(connection) {
+            Ok(row) => row,
             Err(result) => return result,
-        }
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return TargetResult::Failed {
-                code: timeout_code,
-                message: format!(
-                    "connection `{}` did not confirm within {wait_ms}ms",
-                    connection.id
-                ),
-            };
+        if let Some(result) = wait_step(
+            &row,
+            &is_done,
+            remaining,
+            wait_ms,
+            &connection.id,
+            timeout_code,
+        ) {
+            return result;
         }
         std::thread::sleep(POLL_INTERVAL.min(remaining));
     }
@@ -609,7 +749,11 @@ mod tests {
     // -- BatchOutcome ------------------------------------------------------
 
     #[test]
-    fn batch_outcome_counts_succeeded_and_skipped_together() {
+    fn batch_outcome_counts_succeeded_skipped_and_failed_separately() {
+        // A skip is neither a success nor a failure — folding it into
+        // `succeeded_count` would make `cli`'s "every target failed" exit
+        // `4` unreachable whenever a disabled id was skipped alongside
+        // every enabled id failing.
         let batch = BatchOutcome {
             targets: vec![
                 TargetOutcome {
@@ -627,10 +771,18 @@ mod tests {
                         message: "boom".to_string(),
                     },
                 },
+                TargetOutcome {
+                    id: "d".to_string(),
+                    result: TargetResult::Dependency {
+                        message: "no bus".to_string(),
+                    },
+                },
             ],
         };
-        assert_eq!(batch.succeeded_count(), 2);
+        assert_eq!(batch.succeeded_count(), 1);
+        assert_eq!(batch.skipped_count(), 1);
         assert_eq!(batch.failed_count(), 1);
+        assert_eq!(batch.dependency_count(), 1);
     }
 
     #[test]
@@ -645,6 +797,8 @@ mod tests {
         };
         assert_eq!(batch.failed_count(), 0);
         assert_eq!(batch.succeeded_count(), 0);
+        assert_eq!(batch.skipped_count(), 0);
+        assert_eq!(batch.dependency_count(), 0);
     }
 
     // -- start/stop/restart wiring, with zero I/O ---------------------------
@@ -736,6 +890,254 @@ mod tests {
                 id: "a".to_string(),
                 result: TargetResult::RefusedDisabled,
             }]
+        );
+    }
+
+    #[test]
+    fn restart_failed_refuses_a_single_disabled_id_without_any_io() {
+        // The disabled policy must run before the `--failed` gather step
+        // — a disabled single-id target is a usage refusal, never a
+        // filtered-away empty-success batch (`docs/config.v1.md`,
+        // "`enabled: false`").
+        let config = config(vec![connection("a", false)]);
+        let batch = restart(&config, &Selector::Id("a".to_string()), 10_000, true)
+            .expect("a is in the config");
+        assert_eq!(
+            batch.targets,
+            vec![TargetOutcome {
+                id: "a".to_string(),
+                result: TargetResult::RefusedDisabled,
+            }]
+        );
+    }
+
+    #[test]
+    fn restart_failed_skips_a_disabled_connection_in_an_all_selector_without_any_io() {
+        let config = config(vec![connection("a", false)]);
+        let batch = restart(&config, &Selector::All, 10_000, true).expect("All always resolves");
+        assert_eq!(
+            batch.targets,
+            vec![TargetOutcome {
+                id: "a".to_string(),
+                result: TargetResult::SkippedDisabled,
+            }]
+        );
+    }
+
+    #[test]
+    fn restart_failed_preserves_selector_order_across_multiple_disabled_ids() {
+        // Outcomes are collected into index-aligned slots precisely so a
+        // batch never reorders disabled/gather-failed ids relative to
+        // restarted ones (`TargetOutcome`'s own doc comment: "in selector
+        // order"). Zero I/O: every id here is disabled, so none reaches
+        // the reconcile round trip.
+        let config = config(vec![
+            connection("a", false),
+            connection("b", false),
+            connection("c", false),
+        ]);
+        let batch = restart(&config, &Selector::All, 10_000, true).expect("All always resolves");
+        let ids: Vec<&str> = batch.targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        assert!(batch
+            .targets
+            .iter()
+            .all(|target| target.result == TargetResult::SkippedDisabled));
+    }
+
+    // -- error classification: SupervisorError / StatusCommandError ---------
+
+    #[test]
+    fn supervisor_result_classifies_a_bus_failure_as_dependency() {
+        let err = SupervisorError::Bus(zbus::Error::Address("no bus".to_string()));
+        let message = err.to_string();
+        assert_eq!(supervisor_result(err), TargetResult::Dependency { message });
+    }
+
+    #[test]
+    fn supervisor_result_classifies_every_other_variant_as_a_per_connection_failure() {
+        let err = SupervisorError::MissingProperty {
+            property: "MainPID",
+        };
+        let message = err.to_string();
+        assert_eq!(
+            supervisor_result(err),
+            TargetResult::Failed {
+                code: ErrorCode::Unknown,
+                message,
+            }
+        );
+    }
+
+    #[test]
+    fn status_command_result_unwraps_a_bus_failure_from_inside_a_supervisor_error() {
+        let source = SupervisorError::Bus(zbus::Error::Address("no bus".to_string()));
+        let message = source.to_string();
+        let err = StatusCommandError::Supervisor {
+            id: "a".to_string(),
+            source: Box::new(source),
+        };
+        assert_eq!(
+            status_command_result(err),
+            TargetResult::Dependency { message }
+        );
+    }
+
+    #[test]
+    fn status_command_result_treats_a_unit_name_error_as_a_per_connection_failure() {
+        let err = StatusCommandError::UnitName {
+            id: "a".to_string(),
+            source: model::UnitNameError::Empty,
+        };
+        let message = err.to_string();
+        assert_eq!(
+            status_command_result(err),
+            TargetResult::Failed {
+                code: ErrorCode::Unknown,
+                message,
+            }
+        );
+    }
+
+    // -- unit_no_longer_active -------------------------------------------------
+
+    #[test]
+    fn unit_no_longer_active_is_false_while_running_via_our_unit() {
+        let row = row(HealthState::Running, Source::Unit, None);
+        assert!(!unit_no_longer_active(&row));
+    }
+
+    #[test]
+    fn unit_no_longer_active_is_false_while_starting() {
+        let row = row(HealthState::Starting, Source::Unit, None);
+        assert!(!unit_no_longer_active(&row));
+    }
+
+    #[test]
+    fn unit_no_longer_active_is_true_once_stopped() {
+        let row = row(HealthState::Stopped, Source::None, None);
+        assert!(unit_no_longer_active(&row));
+    }
+
+    #[test]
+    fn unit_no_longer_active_is_true_for_a_foreign_port_conflict_after_our_unit_is_gone() {
+        // `stop` cannot clear a Foreign holder (`docs/reconcile.v1.md`,
+        // "Lifecycle (not pure Reconcile)") — once our own Unit is no
+        // longer running/starting, `stop` has done everything it can.
+        let row = row(
+            HealthState::Error,
+            Source::None,
+            Some(StatusError {
+                code: ErrorCode::PortInUse,
+                detail: "held by pid 999".to_string(),
+            }),
+        );
+        assert!(unit_no_longer_active(&row));
+    }
+
+    // -- terminal_error_result --------------------------------------------
+
+    #[test]
+    fn terminal_error_result_is_none_for_a_healthy_row() {
+        let row = row(HealthState::Running, Source::Unit, None);
+        assert_eq!(terminal_error_result(&row), None);
+    }
+
+    #[test]
+    fn terminal_error_result_surfaces_the_rows_own_code_and_detail() {
+        let row = row(
+            HealthState::Error,
+            Source::None,
+            Some(StatusError {
+                code: ErrorCode::PortInUse,
+                detail: "held by pid 999".to_string(),
+            }),
+        );
+        assert_eq!(
+            terminal_error_result(&row),
+            Some(TargetResult::Failed {
+                code: ErrorCode::PortInUse,
+                message: "held by pid 999".to_string(),
+            })
+        );
+    }
+
+    // -- wait_step (pure wait/timeout decision) -----------------------------
+
+    #[test]
+    fn wait_step_succeeds_immediately_once_is_done() {
+        let row = row(HealthState::Running, Source::Unit, None);
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::from_secs(5),
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(result, Some(TargetResult::Succeeded));
+    }
+
+    #[test]
+    fn wait_step_short_circuits_on_a_terminal_error_even_with_time_remaining() {
+        // A fresh `port_in_use` will not resolve itself by waiting longer
+        // — report it now instead of polling until `wait_ms` elapses.
+        let row = row(
+            HealthState::Error,
+            Source::None,
+            Some(StatusError {
+                code: ErrorCode::PortInUse,
+                detail: "held by pid 999".to_string(),
+            }),
+        );
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::from_secs(5),
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(
+            result,
+            Some(TargetResult::Failed {
+                code: ErrorCode::PortInUse,
+                message: "held by pid 999".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn wait_step_keeps_waiting_when_not_done_and_time_remains() {
+        let row = row(HealthState::Starting, Source::Unit, None);
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::from_secs(5),
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn wait_step_times_out_with_the_given_code_when_remaining_is_zero() {
+        let row = row(HealthState::Starting, Source::Unit, None);
+        let result = wait_step(
+            &row,
+            &is_running,
+            Duration::ZERO,
+            10_000,
+            "a",
+            ErrorCode::StartTimeout,
+        );
+        assert_eq!(
+            result,
+            Some(TargetResult::Failed {
+                code: ErrorCode::StartTimeout,
+                message: "connection `a` did not confirm within 10000ms".to_string(),
+            })
         );
     }
 }
