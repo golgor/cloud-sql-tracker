@@ -19,7 +19,7 @@ Producers: only the control plane CLI (`status --json`).
 One **Status document** is a **point-in-time snapshot** of every configured Connection after reconcile:
 
 - Config says what *should* exist (id, name, ports, …).
-- Reconcile observes Unit / Orphan / port and assigns a **Health state**.
+- Reconcile observes Unit / Orphan / port and assigns a **Health state** (rules: [`reconcile.v1.md`](./reconcile.v1.md)).
 - Aggregates at the top are derived only from `connections[].state` (and group keys).
 
 This is **not** a config file, not a log stream, and not a doctor report.

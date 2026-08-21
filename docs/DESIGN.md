@@ -85,7 +85,10 @@ Operators **must** have working [Application Default Credentials (ADC)](https://
 
 `stopped` | `starting` | `running` | `error`
 
-v1 `running` ≈ unit active (or adopted PID) **and** local port accepting TCP. That is **local listener health**, not “Cloud SQL is reachable.”
+v1 `running` ≈ unit active (or healthy Orphan) **and** local port accepting TCP. That is **local listener health**, not “Cloud SQL is reachable.”
+
+Full observe → Health mapping (pure Reconcile, start window, truth table, error codes):
+[`docs/reconcile.v1.md`](./reconcile.v1.md).
 
 ### Deferred research — proxy HTTP health-check
 

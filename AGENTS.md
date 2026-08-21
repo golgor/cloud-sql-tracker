@@ -24,6 +24,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`docs/status-document.v1.md`](./docs/status-document.v1.md) | **Full field-by-field meaning** of `status --json` |
 | [`schemas/status.v1.json`](./schemas/status.v1.json) | Machine-readable Status document schema |
 | [`examples/status.v1.json`](./examples/status.v1.json) | Golden snapshot |
+| [`docs/reconcile.v1.md`](./docs/reconcile.v1.md) | **Health state transitions** (pure Reconcile truth table) |
 | [`docs/research/`](./docs/research/) | systemd / port / journal research |
 
 ## Status document (critical)
