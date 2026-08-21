@@ -15,7 +15,7 @@ fi
 check() {
   local schema="$1"
   local instance="$2"
-  echo "validate ${instance} against ${schema}"
+  echo "validate '${instance}' against '${schema}'"
   check-jsonschema --schemafile "${schema}" "${instance}"
 }
 
