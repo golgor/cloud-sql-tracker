@@ -8,6 +8,7 @@
 //! `reconcile` (#37), the adapters (#39–#41), and `commands` (#42+). Until
 //! those land, nothing outside this module's own tests references most of
 //! these items, so `rustc`/clippy see them as dead code under `-D warnings`.
+//! Remove this `allow` once `commands` (#42) starts using these types.
 //! `unit_name` is the exception — it is this ticket's tested proof.
 #![allow(dead_code)]
 
@@ -35,13 +36,27 @@ const MAX_UNIT_NAME_LEN: usize = 255;
 
 /// The systemd `.service` unit name for a Connection id.
 ///
-/// `cloud-sql-proxy-<id>.service` after id sanitizing per
-/// `docs/research/systemd-user-units.md` ("Unit name pattern and `<id>`
-/// restrictions"). A config-valid id (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) already
-/// satisfies the unit-name charset, so it passes through unchanged.
+/// A config-valid id (`docs/config.v1.md`, "Connection fields":
+/// `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1–64) already satisfies the
+/// unit-name charset, so it is used **unchanged** — sanitizing a
+/// config-valid id (e.g. collapsing `a--b` to `a-b`) would let two
+/// different Connection ids collide on one unit name. Only an id outside
+/// that shape is sanitized per `docs/research/systemd-user-units.md`
+/// ("Unit name pattern and `<id>` restrictions": map disallowed characters
+/// to `-`, collapse repeated `-`, trim leading/trailing `.`/`-`).
+///
+/// `docs/modules.v1.md` writes this seam as `unit_name(id) -> UnitName`.
+/// The return type here is `Result<UnitName, UnitNameError>` because a
+/// **non**-config-valid id can still sanitize to nothing (`Empty`) or,
+/// once prefixed and suffixed, exceed the systemd unit-name length limit
+/// (`TooLong`). A config-valid id never hits either error in practice.
 pub(crate) fn unit_name(id: &str) -> Result<UnitName, UnitNameError> {
-    let sanitized = sanitize_unit_id(id)?;
-    let name = format!("cloud-sql-proxy-{sanitized}.service");
+    let core = if is_config_valid_id(id) {
+        id.to_string()
+    } else {
+        sanitize_unit_id(id)?
+    };
+    let name = format!("cloud-sql-proxy-{core}.service");
     if name.len() > MAX_UNIT_NAME_LEN {
         return Err(UnitNameError::TooLong {
             len: name.len(),
@@ -51,8 +66,22 @@ pub(crate) fn unit_name(id: &str) -> Result<UnitName, UnitNameError> {
     Ok(UnitName(name))
 }
 
+/// Whether `id` already satisfies the config `id` rule
+/// (`docs/config.v1.md`, "Connection fields": `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`,
+/// length 1–64). Such an id must reach [`unit_name`] unchanged.
+fn is_config_valid_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    let mut chars = id.chars();
+    let starts_alphanumeric = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    let rest_is_id_safe = chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    starts_alphanumeric && rest_is_id_safe
+}
+
 /// Steps 1–4 of the control-plane `<id>` rules in
-/// `docs/research/systemd-user-units.md`.
+/// `docs/research/systemd-user-units.md`, for an id that is **not**
+/// already config-valid.
 fn sanitize_unit_id(id: &str) -> Result<String, UnitNameError> {
     let mapped: String = id
         .chars()
@@ -284,6 +313,15 @@ mod tests {
         let long_id = "a".repeat(232);
         let err = unit_name(&long_id).expect_err("256 bytes exceeds the systemd limit");
         assert_eq!(err, UnitNameError::TooLong { len: 256, max: 255 });
+    }
+
+    #[test]
+    fn unit_name_keeps_a_config_valid_id_with_repeated_dashes_unchanged() {
+        // "a--b" already satisfies the config id charset
+        // (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`), so it must not collapse to "a-b".
+        // Two different config ids must never sanitize to one unit name.
+        let name = unit_name("a--b").expect("a--b is a valid id");
+        assert_eq!(name.as_str(), "cloud-sql-proxy-a--b.service");
     }
 
     #[test]
