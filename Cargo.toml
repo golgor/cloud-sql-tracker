@@ -18,6 +18,11 @@ thiserror = "2"
 zbus = "5.19.0"
 # clap lands with cli (#45).
 
+[dev-dependencies]
+# Layer 2 schema-shape proof only (docs/research/json-schema-crate.md);
+# does not close #23. Kept out of normal deps.
+jsonschema = { version = "0.50", default-features = false }
+
 [profile.release]
 lto = true
 codegen-units = 1

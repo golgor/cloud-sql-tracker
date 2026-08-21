@@ -119,10 +119,6 @@ fn home_dir() -> PathBuf {
 
 /// Look up a Connection by id. No selector expansion — that stays in
 /// `commands` (`docs/modules.v1.md`, "config — deep validation").
-///
-/// Used by `commands`/`cli` (#42+); exercised directly by this module's
-/// tests until then.
-#[allow(dead_code)]
 pub(crate) fn by_id<'a>(config: &'a Config, id: &str) -> Option<&'a Connection> {
     config
         .connections

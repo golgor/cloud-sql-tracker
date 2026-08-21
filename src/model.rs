@@ -3,14 +3,11 @@
 //! See `docs/modules.v1.md` ("model — types, not behavior") for the freeze
 //! this module implements. Nothing here does I/O or holds a `clap` type.
 //!
-//! This ticket ([#35](https://github.com/golgor/cloud-sql-tracker/issues/35))
-//! lands the frozen shapes ahead of their consumers: `config` (#36),
-//! `reconcile` (#37), the adapters (#39–#41), and `commands` (#42+). Until
-//! those land, nothing outside this module's own tests references most of
-//! these items, so `rustc`/clippy see them as dead code under `-D warnings`.
-//! Remove this `allow` once `commands` (#42) starts using these types.
-//! `unit_name` is the exception — it is this ticket's tested proof.
-#![allow(dead_code)]
+//! JSON field names for the Status document (`docs/status-document.v1.md`)
+//! are owned here via `serde::Serialize`, not by `commands` — this is the
+//! one place that knows both the Rust name and the wire name.
+
+use serde::{Serialize, Serializer};
 
 /// The systemd `--user` unit name for one Connection's managed Proxy process.
 ///
@@ -29,6 +26,17 @@ impl UnitName {
 impl std::fmt::Display for UnitName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// A `UnitName` is always a plain string on the wire (e.g. the Status
+/// document's `unit` field) — never the newtype wrapper.
+impl Serialize for UnitName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
     }
 }
 
@@ -162,7 +170,11 @@ pub(crate) struct Connection {
 }
 
 /// A Connection's health, produced by Reconcile (`docs/reconcile.v1.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes to the Status document's lowercase `state` strings
+/// (`docs/status-document.v1.md`, "`state` (Health state)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum HealthState {
     Stopped,
     Starting,
@@ -174,7 +186,11 @@ pub(crate) enum HealthState {
 ///
 /// Only `unit` | `none` in v1 — there is no `orphan` Source
 /// (`CONTEXT.md`, "Source"; `docs/status-document.v1.md`, "source").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes to the Status document's lowercase `source` strings
+/// (`docs/status-document.v1.md`, "`source` (ownership)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Source {
     /// Process is the MainPID of our expected user Unit.
     Unit,
@@ -205,27 +221,40 @@ pub(crate) enum PortProbe {
 
 /// Stable machine token for a Status row `error.code`
 /// (`docs/status-document.v1.md`, "error object"). New codes are additive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes to the Status document's `error.code` catalog
+/// (`docs/status-document.v1.md`, "`error` object").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ErrorCode {
+    /// `start` / `doctor` only (#43/#44) — `reconcile` never constructs this.
+    #[allow(dead_code)]
     BinMissing,
     PortInUse,
     ExecFailed,
     UnitFailed,
     StartTimeout,
+    /// `start` only (#43) — `reconcile` never constructs this.
+    #[allow(dead_code)]
     Auth,
+    /// `start` only (#43) — `reconcile` never constructs this.
+    #[allow(dead_code)]
     Config,
+    /// Fallback for `start`/`doctor` (#43/#44) — `reconcile` never
+    /// constructs this; its own unmapped cases already have named codes.
+    #[allow(dead_code)]
     Unknown,
 }
 
 /// Present on a Status row only when `state == Error`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StatusError {
     pub(crate) code: ErrorCode,
     pub(crate) detail: String,
 }
 
 /// One `connections[]` element of the Status document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StatusRow {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -244,7 +273,7 @@ pub(crate) struct StatusRow {
 }
 
 /// Per-group counters inside the Status document's `groups` map.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub(crate) struct GroupCounts {
     pub(crate) running: u32,
     pub(crate) starting: u32,
@@ -254,7 +283,7 @@ pub(crate) struct GroupCounts {
 }
 
 /// The `status --json` document (`docs/status-document.v1.md`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StatusDocument {
     pub(crate) version: u32,
     pub(crate) ts: String,
@@ -269,6 +298,11 @@ pub(crate) struct StatusDocument {
 }
 
 /// One `doctor` check's severity (`docs/doctor.v1.md`).
+///
+/// Already constructed by `supervisor`/`env`/`journal` check rows, but not
+/// yet consumed by a `commands::doctor` (#44) or serialized anywhere —
+/// remove this `allow` once #44 lands.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckStatus {
     Pass,
@@ -276,7 +310,9 @@ pub(crate) enum CheckStatus {
     Fail,
 }
 
-/// One `doctor --json` `checks[]` element.
+/// One `doctor --json` `checks[]` element. Unused outside adapter checks
+/// until `commands::doctor` (#44) lands — remove this `allow` then.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CheckRow {
     pub(crate) id: String,
@@ -285,7 +321,9 @@ pub(crate) struct CheckRow {
     pub(crate) hint: Option<String>,
 }
 
-/// The `doctor --json` document (`docs/doctor.v1.md`).
+/// The `doctor --json` document (`docs/doctor.v1.md`). Unused until
+/// `commands::doctor` (#44) lands — remove this `allow` then.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DoctorReport {
     pub(crate) version: u32,

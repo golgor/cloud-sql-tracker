@@ -4,14 +4,9 @@
 //! (`std::net::TcpStream::connect_timeout` for liveness, `procfs` for
 //! socket-inode-to-PID/name attribution — not `listeners`, not `ss`).
 //!
-//! This ticket ([#39](https://github.com/golgor/cloud-sql-tracker/issues/39))
-//! lands the adapter ahead of its callers: `commands` (#42+) composes
-//! [`observe`]'s `model::PortObservation` with `supervisor::show` into
-//! Reconcile's `Observation`, and `commands::doctor`'s `ports` check
-//! reuses this same probe. Until those land, nothing outside this
-//! module's own tests calls [`observe`], so `rustc`/clippy see it as dead
-//! code under `-D warnings`. Remove this `allow` once a caller lands.
-#![allow(dead_code)]
+//! `commands::status` (#42) composes [`observe`]'s `model::PortObservation`
+//! with `supervisor::show` into Reconcile's `Observation`, and
+//! `commands::doctor`'s (#44) `ports` check will reuse this same probe.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpStream};

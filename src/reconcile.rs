@@ -5,13 +5,9 @@
 //! for the frozen seam: `reconcile(identity, observation, now) ->
 //! StatusRowFields`.
 //!
-//! No I/O, no `clap`, no `trait Supervisor`. `commands` (#42+) will gather
-//! [`Observation`] from `supervisor::show` (#40) and `port::observe` (#39)
-//! and call [`reconcile`]; until then nothing outside this module's own
-//! tests uses these items, so the plain (non-test) library build sees them
-//! as dead code under `-D warnings`.
-//! Remove this `allow` once `commands` (#42) starts calling [`reconcile`].
-#![allow(dead_code)]
+//! No I/O, no `clap`, no `trait Supervisor`. `commands::status` (#42)
+//! gathers [`Observation`] from `supervisor::show` and `port::observe`
+//! and calls [`reconcile`].
 
 use std::time::{Duration, SystemTime};
 
