@@ -7,10 +7,10 @@
 //!
 //! This module does not build Reconcile's `Observation` — it returns
 //! [`UnitSnapshot`], a supervisor-local shape. `commands::status` (#42) maps
-//! a `show` snapshot into `reconcile::UnitObservation`. `start_transient`,
-//! `stop`, and `systemd_user_check` are still only reachable from mutate
-//! (#43) / doctor (#44) and stay individually `#[allow(dead_code)]` until
-//! those land.
+//! a `show` snapshot into `reconcile::UnitObservation`, and
+//! `commands::doctor` (#44) calls `systemd_user_check` directly.
+//! `start_transient` and `stop` are still only reachable from mutate (#43)
+//! and stay individually `#[allow(dead_code)]` until it lands.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -392,9 +392,6 @@ pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
 
 /// Doctor's `systemd_user` row (`docs/doctor.v1.md`, "`systemd_user` —
 /// hard"): can this environment reach the systemd user manager at all.
-///
-/// Only reachable from `commands::doctor` (#44) so far.
-#[allow(dead_code)]
 pub(crate) fn systemd_user_check() -> CheckRow {
     match manager_version() {
         Ok(version) => CheckRow {

@@ -5,17 +5,13 @@
 //! `journalctl` is shelled out to — the interface we want, per
 //! `docs/research/journalctl-logs.md` — never a Rust journal-reading crate.
 //!
-//! This ticket ([#41](https://github.com/golgor/cloud-sql-tracker/issues/41))
-//! lands the adapter ahead of its caller, `commands::logs` / `commands::doctor`
-//! (#44). Until that lands, nothing outside this module's own tests calls
-//! these `pub(crate)` functions, so `rustc`/clippy see them as dead code
-//! under `-D warnings`. Remove this `allow` once a caller lands.
+//! `commands::logs` and `commands::doctor` (#44) are this module's
+//! callers.
 //!
 //! Hint wording and which stream (stdout vs stderr) a hint goes on are
 //! `cli`'s job, not this module's (`docs/modules.v1.md`): `dump` only
 //! reports whether journalctl produced any lines, never a message meant
 //! for a human. Likewise this module never chooses a process exit code.
-#![allow(dead_code)]
 
 use std::ffi::OsStr;
 use std::process::{Command, Output};
