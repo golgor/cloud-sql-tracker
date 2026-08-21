@@ -26,6 +26,13 @@ use crate::supervisor::{self, SupervisorError, UnitSnapshot};
 use super::select::{self, SelectError, Selector};
 use super::status::{self, StatusCommandError};
 
+/// `--wait-ms`'s default for `start`/`stop`/`restart`
+/// (`docs/cli-contract.v1.md`, "`start`": "Default: **10000** (10s)").
+/// Lives here, not in `cli`, because it is this module's own start-window
+/// interaction with Reconcile (`docs/modules.v1.md`, "commands": "Hides:
+/// `--wait-ms` default 10000").
+pub(crate) const DEFAULT_WAIT_MS: u64 = 10_000;
+
 // ---------------------------------------------------------------------------
 // Outcomes.
 // ---------------------------------------------------------------------------
@@ -94,11 +101,10 @@ impl BatchOutcome {
     /// Only [`TargetResult::Succeeded`] — a skip is neither a success nor
     /// a failure, so it is **not** folded in here. Counting
     /// [`TargetResult::SkippedDisabled`] as a success would make `cli`'s
-    /// (#45) "every attempted target failed" exit `4`
+    /// "every attempted target failed" exit `4`
     /// (`docs/cli-contract.v1.md`, "Exit code table") unreachable whenever
     /// a disabled id happened to be skipped alongside every enabled id
     /// failing.
-    #[allow(dead_code)]
     pub(crate) fn succeeded_count(&self) -> usize {
         self.targets
             .iter()
@@ -108,10 +114,9 @@ impl BatchOutcome {
 
     /// [`TargetResult::SkippedDisabled`] only (`docs/config.v1.md`,
     /// "`enabled: false`": skipped ids "do not by themselves force exit
-    /// `1`/`4`"). `cli` (#45) needs this separated from
+    /// `1`/`4`"). `cli` needs this separated from
     /// [`succeeded_count`](Self::succeeded_count) to apply that rule
     /// without a skip masquerading as a success.
-    #[allow(dead_code)]
     pub(crate) fn skipped_count(&self) -> usize {
         self.targets
             .iter()
@@ -126,7 +131,6 @@ impl BatchOutcome {
     /// [`TargetResult::Dependency`] is counted separately by
     /// [`dependency_count`](Self::dependency_count) so `cli` can prefer
     /// exit `3` when every failure is environmental.
-    #[allow(dead_code)]
     pub(crate) fn failed_count(&self) -> usize {
         self.targets
             .iter()
@@ -138,7 +142,6 @@ impl BatchOutcome {
     /// an unreachable systemd user bus (`docs/cli-contract.v1.md`, "Exit
     /// code table": exit `3`, "Prefer `3` when failure is environmental
     /// rather than per-id").
-    #[allow(dead_code)]
     pub(crate) fn dependency_count(&self) -> usize {
         self.targets
             .iter()
@@ -199,14 +202,13 @@ fn stop_idempotent(row: &StatusRow) -> Option<TargetResult> {
 // ---------------------------------------------------------------------------
 
 /// Start every Connection the selector names
-/// (`docs/modules.v1.md`, "commands": "start" row). Only reachable from
-/// `cli` (#45) so far, the same as `status` (#42) — this ticket
-/// ([#43](https://github.com/golgor/cloud-sql-tracker/issues/43)) proves
+/// (`docs/modules.v1.md`, "commands": "start" row). Called by `cli`'s
+/// `start` subcommand (#45), the same as `status` (#42) — this ticket
+/// ([#43](https://github.com/golgor/cloud-sql-tracker/issues/43)) proved
 /// the pure selection/idempotency/disabled policy through this module's own
 /// unit tests; the real `supervisor`/`port` round trip needs a live
 /// systemd user session, which `docs/verification.v1.md` does not require
 /// as a unit test.
-#[allow(dead_code)]
 pub(crate) fn start(
     config: &Config,
     selector: &Selector,
@@ -323,9 +325,9 @@ fn check_message(detail: &str, hint: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 /// Stop every Connection the selector names
-/// (`docs/modules.v1.md`, "commands": "stop" row). See [`start`]'s doc
-/// comment for why this is not unit-tested against a real systemd session.
-#[allow(dead_code)]
+/// (`docs/modules.v1.md`, "commands": "stop" row). Called by `cli`'s
+/// `stop` subcommand (#45). See [`start`]'s doc comment for why this is
+/// not unit-tested against a real systemd session.
 pub(crate) fn stop(
     config: &Config,
     selector: &Selector,
@@ -458,9 +460,9 @@ fn wait_for_stop(unit: &UnitName, wait_ms: u64) -> TargetResult {
 
 /// Restart every Connection the selector names, or only those currently in
 /// Health state `error` when `failed_only` (`docs/cli-contract.v1.md`,
-/// "`restart`"). See [`start`]'s doc comment for why this is not
-/// unit-tested against a real systemd session.
-#[allow(dead_code)]
+/// "`restart`"). Called by `cli`'s `restart` subcommand (#45). See
+/// [`start`]'s doc comment for why this is not unit-tested against a real
+/// systemd session.
 pub(crate) fn restart(
     config: &Config,
     selector: &Selector,

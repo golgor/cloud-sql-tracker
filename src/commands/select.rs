@@ -15,9 +15,9 @@ use crate::model::{Connection, HealthState, StatusRow};
 /// selectors": "Mutual exclusion"); enforcing that exclusivity is `cli`'s
 /// job when it builds this value, not this module's.
 ///
-/// `cli` (#45) constructs these from argv; this ticket's own tests
-/// construct every variant directly against [`expand`].
-#[allow(dead_code)]
+/// `cli`'s `resolve_selector` (#45) constructs these from argv; this
+/// ticket's own tests construct every variant directly against
+/// [`expand`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Selector {
     /// Every connection in the config document, in config order.

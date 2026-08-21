@@ -4,12 +4,10 @@
 //!
 //! [#42](https://github.com/golgor/cloud-sql-tracker/issues/42) landed
 //! selector expansion and `status`. [#44](https://github.com/golgor/cloud-sql-tracker/issues/44)
-//! landed `doctor` and `logs`. This ticket
-//! ([#43](https://github.com/golgor/cloud-sql-tracker/issues/43)) adds
-//! `start`/`stop`/`restart` on the same seam, reusing `status`'s
-//! Observation-gather + Reconcile round trip
-//! (`src/commands/status.rs::observe_and_reconcile`) for idempotency
-//! checks and wait loops.
+//! landed `doctor` and `logs`. [#43](https://github.com/golgor/cloud-sql-tracker/issues/43)
+//! added `start`/`stop`/`restart`. This ticket
+//! ([#45](https://github.com/golgor/cloud-sql-tracker/issues/45)) is the
+//! first caller of this whole seam: `cli`.
 
 mod doctor;
 mod logs;
@@ -17,15 +15,13 @@ mod mutate;
 mod select;
 mod status;
 
-// Re-exported for `cli` (#45), which does not exist yet — each item is
-// already exercised through its own module's tests.
-#[allow(unused_imports)]
 pub(crate) use doctor::doctor;
-#[allow(unused_imports)]
 pub(crate) use logs::{logs, LogsCommandError};
-#[allow(unused_imports)]
-pub(crate) use mutate::{restart, start, stop, BatchOutcome, TargetOutcome, TargetResult};
-#[allow(unused_imports)]
-pub(crate) use select::{filter_failed, SelectError, Selector};
-#[allow(unused_imports)]
+pub(crate) use mutate::{
+    restart, start, stop, BatchOutcome, TargetOutcome, TargetResult, DEFAULT_WAIT_MS,
+};
+// `filter_failed` stays internal to `commands::mutate`'s own
+// `restart --failed` gather step (`super::select::filter_failed`) — nothing
+// outside `commands` calls it, so it is not re-exported here.
+pub(crate) use select::{SelectError, Selector};
 pub(crate) use status::{status, StatusCommandError};

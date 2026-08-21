@@ -27,15 +27,14 @@ use crate::{env, journal, port};
 /// (`docs/doctor.v1.md`, "Recommended check order"). `cli` (#45) resolves
 /// `cfg_path` (`--config` or the default XDG path) before calling this.
 ///
-/// Only reachable from `cli` (#45) so far — this ticket
-/// ([#44](https://github.com/golgor/cloud-sql-tracker/issues/44)) proves
+/// Called by `cli`'s `doctor` subcommand (#45). This ticket
+/// ([#44](https://github.com/golgor/cloud-sql-tracker/issues/44)) proved
 /// the per-check composition through this module's own unit tests instead,
 /// the same spirit `commands::status` (#42) already established: `config`
 /// and `ports` are exercised directly; `proxy_bin` / `systemd_user` / `adc`
 /// / `journal_user` are each a single adapter's own `*_check`, already
 /// tested in that adapter's module (`docs/verification.v1.md`: adapters
 /// are not required as unit tests here too).
-#[allow(dead_code)]
 pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
     let loaded = config::load(cfg_path);
     let config = loaded.as_ref().ok();
