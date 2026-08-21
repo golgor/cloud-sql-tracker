@@ -47,28 +47,21 @@ Use these design terms exactly: **module**, **interface**, **implementation**, *
 
 One library crate + thin bin so unit tests do not go through `main`:
 
-```text
-src/main.rs                 # bin: std::process::exit(cli::run())
-src/lib.rs                  # crate root; no clap *types* outside `cli`
-
-src/cli.rs                  # clap derive, printing, exit mapping
-src/model.rs                # domain / JSON DTO types
-src/config.rs               # load + validate + defaults merge
-src/reconcile.rs            # PURE truth table
-src/supervisor.rs           # systemd --user adapter
-src/port.rs                 # TCP liveness + listener PID
-src/journal.rs              # journalctl adapter
-src/env.rs                  # proxy binary PATH + ADC discovery
-
-src/commands.rs             # public command seam (what cli calls)
-src/commands/select.rs      # internal: selector expansion + BatchOutcome
-src/commands/status.rs      # internal
-src/commands/mutate.rs      # internal: start / stop / restart
-src/commands/doctor.rs      # internal facade
-src/commands/logs.rs        # internal facade
+```mermaid
+flowchart TB
+  main["src/main.rs — exit(cli::run())"] --> cli[cli]
+  cli --> commands["commands — public seam"]
+  subgraph cmdfiles["internal files — not public seams"]
+    select[select]
+    statusf[status]
+    mutate[mutate]
+    doctorf[doctor]
+    logsf[logs]
+  end
+  commands --> cmdfiles
 ```
 
-Exact file names inside `commands/` may move; the **public seam** does not.
+Illustrative paths (names inside `commands/` may move; the **public seam** does not): `src/main.rs`, `src/lib.rs`, `src/cli.rs`, `src/model.rs`, `src/config.rs`, `src/reconcile.rs`, `src/supervisor.rs`, `src/port.rs`, `src/journal.rs`, `src/env.rs`, `src/commands.rs` + `src/commands/{select,status,mutate,doctor,logs}.rs`.
 
 **Visibility:** crate items used across modules are **`pub(crate)`**. This is **not** a public Rust library contract (no semver for `cloud_sql_tracker::…` outside the binary).
 
@@ -80,17 +73,25 @@ Exact file names inside `commands/` may move; the **public seam** does not.
 
 ## Dependency direction (acyclic)
 
-```text
-cli  →  commands  →  reconcile     (pure)
-                  →  config
-                  →  supervisor, port, journal, env
-                  →  model
-
-config     → model
-reconcile  → model only     (no fs, no systemd, no clap, no clock syscalls)
-supervisor / port / journal / env → model (snapshots / check rows / DTOs only)
-model      → (almost) nothing
+```mermaid
+flowchart TB
+  cli[cli] --> commands[commands]
+  commands --> reconcile["reconcile — pure"]
+  commands --> config[config]
+  commands --> supervisor[supervisor]
+  commands --> port[port]
+  commands --> journal[journal]
+  commands --> env[env]
+  commands --> model[model]
+  config --> model
+  reconcile --> model
+  supervisor --> model
+  port --> model
+  journal --> model
+  env --> model
 ```
+
+`reconcile` depends on **`model` only** (no fs, no systemd, no clap, no clock syscalls). Adapters depend on `model` for snapshots / check rows / DTOs. `model` depends on almost nothing.
 
 **Forbidden:**
 
@@ -239,13 +240,33 @@ What `cli` calls after argv is parsed. **Internal files** for readability (`sele
 | `stop(cfg, selector, wait_ms) -> BatchOutcome` | Our Unit only; `reset-failed` via supervisor; already stopped = success no-op |
 | `restart(cfg, selector, wait_ms, failed_only) -> BatchOutcome` | After selector expansion, **`--failed` is an error-state filter** (keep Health `error` only — not a fourth selector). Empty after filter = success |
 | `doctor(cfg_path) -> DoctorReport` | Orchestrate six checks; **do not fail-fast** on bad config. Still run `proxy_bin`, `systemd_user`, `adc`, `journal_user` if config failed. |
+| `logs(cfg, id, lines) -> Result<Dump, …>` | Facade over `journal::dump` |
 
 `BatchOutcome` is part of this **public-within-crate** seam (defined next to these fns, not buried as `select`-only).
-| `logs(cfg, id, lines) -> Result<Dump, …>` | Facade over `journal::dump` |
 
 **Hides:** `--wait-ms` default **10000**, start-window interaction with Reconcile, selector expansion (`id` / `--group` / `--all` + disabled-skip), `--failed` filter, Observation gather (one **internal** helper used by status and mutate).
 
 **Selector:** wholly in `commands` (`select.rs`). `config` only `by_id`.
+
+**`status` flow** (I/O outside Reconcile):
+
+```mermaid
+sequenceDiagram
+  participant cli as cli
+  participant cmd as commands
+  participant sup as supervisor
+  participant prt as port
+  participant rec as reconcile
+  cli->>cmd: status(cfg, selector)
+  cmd->>sup: show(unit)
+  sup-->>cmd: UnitSnapshot
+  cmd->>prt: observe(address, port)
+  prt-->>cmd: PortObservation
+  cmd->>cmd: compose Observation
+  cmd->>rec: reconcile(identity, observation, now)
+  rec-->>cmd: StatusRowFields
+  cmd-->>cli: StatusDocument
+```
 
 **Doctor check owners** (commands only stitches the report):
 
@@ -259,6 +280,18 @@ What `cli` calls after argv is parsed. **Internal files** for readability (`sele
 | `ports` | **`commands::doctor`** stitches `port::observe` + `supervisor::show` (our Unit `MainPID` vs Foreign holder). `port` owns observation only; never a `bool` “in use?” that ignores the Unit. Warn-only; skip/pass if config not loaded — see doctor.v1. |
 
 Adapters that own a **single** doctor check return a **CheckRow** (`status`, `detail`, `hint`), not a bare `bool`. `ports` is the exception: it needs two adapters, so `commands` owns the row.
+
+```mermaid
+flowchart LR
+  doc["commands::doctor"]
+  doc --> cfg["config — config"]
+  doc --> envmod["env — proxy_bin, adc"]
+  doc --> sup["supervisor — systemd_user"]
+  doc --> jour["journal — journal_user"]
+  doc --> ports["ports row"]
+  ports --> prt["port::observe"]
+  ports --> show["supervisor::show"]
+```
 
 ### `cli` — thin shell (clap)
 
@@ -328,7 +361,7 @@ fn main() {
 
 ## Implementer checklist (non-normative)
 
-1. `lib.rs` + modules above; `main.rs` only clap + `exit`.
+1. `lib.rs` + modules above; `main.rs` is only `exit(cli::run())`.
 2. `config::parse` + `reconcile` first (pure, TDD).
 3. Adapters (`env`, `supervisor`, `port`, `journal`); `commands::status` wires them.
 4. Mutating commands last; **never** start/stop from `reconcile`.
