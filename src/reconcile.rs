@@ -54,7 +54,8 @@ pub(crate) struct UnitObservation {
 /// distinguishes (`docs/reconcile.v1.md`, "Truth table").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitState {
-    /// Not loaded, or loaded and `inactive`/`dead`. Not failed.
+    /// Not loaded (including "unit not found"), or loaded and
+    /// `inactive`/`dead`. Not failed.
     Idle,
     Activating,
     Active,
@@ -179,7 +180,7 @@ fn classify(
     port_number: u16,
 ) -> Classification {
     let outcome = match unit.state {
-        UnitState::Idle => classify_idle(port_open, port, port_number),
+        UnitState::Idle => classify_inactive(port_open, port, port_number),
         UnitState::Activating => classify_activating(unit, port_open, port, now, port_number),
         UnitState::Active => classify_active(unit, port_open, port, now, port_number),
         UnitState::Deactivating => classify_deactivating(unit, port_open),
@@ -209,8 +210,9 @@ fn classify(
     }
 }
 
-/// Truth-table rows for `Unit = none / inactive / dead`.
-fn classify_idle(port_open: bool, port: &PortObservation, port_number: u16) -> Outcome {
+/// Truth-table rows for `Unit = none / inactive / dead`
+/// ([`UnitState::Idle`]).
+fn classify_inactive(port_open: bool, port: &PortObservation, port_number: u16) -> Outcome {
     if port_open {
         // No unit at all owns this port; any holder is a conflict.
         return Outcome {
@@ -439,19 +441,23 @@ fn port_is_open(probe: PortProbe) -> bool {
 }
 
 /// `docs/reconcile.v1.md`, "Start window": true while the Unit's current
-/// start attempt is at most [`START_WINDOW`] old. A missing `started_at` is
-/// treated as "just started" (age zero), not "never started".
+/// start attempt is at most [`START_WINDOW`] old. A **missing** `started_at`
+/// gives Reconcile no timestamp to judge freshness from. Treat it as
+/// **outside** the window, never "just started", so an undated Connection
+/// does not stay `starting` forever (`docs/reconcile.v1.md`, "Start
+/// window": "after the window, do not leave the row in eternal
+/// starting").
 fn within_start_window(started_at: Option<SystemTime>, now: SystemTime) -> bool {
-    age_since(started_at, now) <= START_WINDOW
+    match started_at {
+        None => false,
+        Some(t) => age_since(t, now) <= START_WINDOW,
+    }
 }
 
-fn age_since(started_at: Option<SystemTime>, now: SystemTime) -> Duration {
-    match started_at {
-        None => Duration::ZERO,
-        // A `started_at` after `now` (clock skew) is treated as just
-        // started rather than an error.
-        Some(t) => now.duration_since(t).unwrap_or(Duration::ZERO),
-    }
+fn age_since(started_at: SystemTime, now: SystemTime) -> Duration {
+    // A `started_at` after `now` (clock skew) is treated as just started
+    // rather than an error.
+    now.duration_since(started_at).unwrap_or(Duration::ZERO)
 }
 
 fn uptime_since(started_at: Option<SystemTime>, now: SystemTime) -> Option<u64> {
@@ -678,6 +684,23 @@ mod tests {
     // -- Row 4: activating, port closed, past window -> start_timeout ------
 
     #[test]
+    fn activating_with_unknown_start_time_and_closed_port_is_a_start_timeout() {
+        // A missing `started_at` is not "just started" — Reconcile has no
+        // timestamp to judge freshness from, so it must not stay `starting`
+        // forever (`docs/reconcile.v1.md`, "Start window": "after the
+        // window, do not leave the row in eternal starting").
+        let unit = unit_with(UnitState::Activating, None, None);
+        let row = reconcile(
+            &connection("fe-dev", 15432),
+            &observe(unit, closed_port()),
+            now(),
+        );
+        assert_eq!(row.state, HealthState::Error);
+        assert_eq!(row.source, Source::Unit);
+        assert_eq!(row.error.unwrap().code, ErrorCode::StartTimeout);
+    }
+
+    #[test]
     fn activating_past_the_start_window_is_a_start_timeout() {
         let unit = unit_with(
             UnitState::Activating,
@@ -800,6 +823,21 @@ mod tests {
         assert_eq!(row.error.unwrap().code, ErrorCode::UnitFailed);
     }
 
+    #[test]
+    fn active_with_unknown_start_time_and_closed_port_is_unit_failed() {
+        // Same reasoning as the `activating` row above: an unknown start
+        // time must not read as "inside the start window".
+        let unit = unit_with(UnitState::Active, Some(111), None);
+        let row = reconcile(
+            &connection("fe-dev", 15432),
+            &observe(unit, closed_port()),
+            now(),
+        );
+        assert_eq!(row.state, HealthState::Error);
+        assert_eq!(row.source, Source::Unit);
+        assert_eq!(row.error.unwrap().code, ErrorCode::UnitFailed);
+    }
+
     // -- Row 10/11: deactivating --------------------------------------------
 
     #[test]
@@ -845,6 +883,27 @@ mod tests {
         let signal = FailureSignal {
             result: UnitResult::ExitCode,
             exec_main_status: 1,
+        };
+        let unit = unit_with(UnitState::Failed(signal), Some(111), None);
+        let row = reconcile(
+            &connection("fe-dev", 15432),
+            &observe(unit, closed_port()),
+            now(),
+        );
+        assert_eq!(row.state, HealthState::Error);
+        assert_eq!(row.source, Source::Unit);
+        assert_eq!(row.error.unwrap().code, ErrorCode::UnitFailed);
+    }
+
+    #[test]
+    fn failed_unit_with_a_core_dump_signal_is_unit_failed() {
+        // OOM kill and other core-dumps surface through systemd as
+        // `Result=core-dump` (`docs/reconcile.v1.md`, "failed (crash / exec
+        // / OOM)"). End-to-end through `reconcile`, not just the internal
+        // classifier, this must still land on `unit_failed`.
+        let signal = FailureSignal {
+            result: UnitResult::CoreDump,
+            exec_main_status: 6,
         };
         let unit = unit_with(UnitState::Failed(signal), Some(111), None);
         let row = reconcile(
