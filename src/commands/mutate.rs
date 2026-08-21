@@ -20,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::Config;
 use crate::env;
-use crate::model::{self, Connection, ErrorCode, HealthState, Source, StatusRow};
-use crate::supervisor::{self, SupervisorError};
+use crate::model::{self, Connection, ErrorCode, HealthState, Source, StatusRow, UnitName};
+use crate::supervisor::{self, SupervisorError, UnitActiveState, UnitSnapshot};
 
 use super::select::{self, SelectError, Selector};
 use super::status::{self, StatusCommandError};
@@ -367,12 +367,68 @@ fn try_stop(connection: &Connection, wait_ms: u64) -> TargetResult {
     if let Err(err) = supervisor::stop(&unit) {
         return supervisor_result(err);
     }
-    wait_for(
-        connection,
-        wait_ms,
-        unit_no_longer_active,
-        ErrorCode::Unknown,
-    )
+    wait_for_stop(&unit, wait_ms)
+}
+
+/// Whether `snapshot` means "safe to `StartTransientUnit` this unit name
+/// again" — `restart`'s stop-then-start handoff needs this, not just
+/// Reconcile's Health-based `stop` idempotency
+/// (`docs/research/supervisor-io.md`: a Unit systemd still has loaded,
+/// including one mid-`deactivating`, rejects a fresh transient start with
+/// `UnitExists`). `docs/reconcile.v1.md`'s `deactivating` + closed-port row
+/// already reports Health `Stopped` while the Unit itself is still loaded
+/// — this predicate reads the Unit's own `ActiveState` instead of going
+/// through Reconcile at all. A `Failed` Unit with no live process is also
+/// safe: `start_transient` already best-effort `ResetFailedUnit`s before
+/// its own `StartTransientUnit` (`docs/modules.v1.md`, "supervisor":
+/// "reset-failed after stop (and on restart)").
+fn unit_safely_recreatable(snapshot: &UnitSnapshot) -> bool {
+    match snapshot {
+        UnitSnapshot::Absent => true,
+        UnitSnapshot::Loaded {
+            active_state: UnitActiveState::Inactive,
+            ..
+        } => true,
+        UnitSnapshot::Loaded {
+            active_state: UnitActiveState::Failed,
+            main_pid,
+            ..
+        } => main_pid.is_none(),
+        UnitSnapshot::Loaded { .. } => false,
+    }
+}
+
+/// `stop`'s wait loop, once a real `supervisor::stop` call has been made.
+/// Polls `supervisor::show` directly instead of `status::observe_and_
+/// reconcile` — `docs/reconcile.v1.md`'s truth table lets an *active* Unit
+/// report Health `error` too (e.g. our Unit is active but a mismatched
+/// listener holds the port, `source: unit`), so a Reconcile-Health-based
+/// wait can never safely short-circuit on a terminal `error` the way
+/// `start`'s [`wait_for`] does: an in-flight stop's own Unit could produce
+/// exactly that shape mid-poll. Completion here is decided solely by
+/// [`unit_safely_recreatable`], which also happens to be the stronger
+/// condition `restart`'s stop-then-start handoff actually needs.
+fn wait_for_stop(unit: &UnitName, wait_ms: u64) -> TargetResult {
+    const POLL_INTERVAL: Duration = Duration::from_millis(200);
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+
+    loop {
+        let snapshot = match supervisor::show(unit) {
+            Ok(snapshot) => snapshot,
+            Err(err) => return supervisor_result(err),
+        };
+        if unit_safely_recreatable(&snapshot) {
+            return TargetResult::Succeeded;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return TargetResult::Failed {
+                code: ErrorCode::Unknown,
+                message: format!("unit `{unit}` did not finish stopping within {wait_ms}ms"),
+            };
+        }
+        std::thread::sleep(POLL_INTERVAL.min(remaining));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,36 +597,15 @@ fn is_running(row: &StatusRow) -> bool {
 }
 
 /// `stop`'s **pre-check** for "nothing to do" (`docs/cli-contract.v1.md`,
-/// "`stop`": "Idempotency: already `stopped` -> success no-op"). Narrower
-/// than [`unit_no_longer_active`] on purpose: a Connection whose Unit is
-/// still `active` (e.g. `error`/`port_in_use` from a listener PID that
-/// does not match `MainPID`, `docs/reconcile.v1.md`'s truth table) is
-/// **not** an idempotent no-op — `stop` still needs to attempt the real
-/// `supervisor::stop` call on our own Unit.
+/// "`stop`": "Idempotency: already `stopped` -> success no-op"). A
+/// Connection whose Unit is still `active` (e.g. `error`/`port_in_use`
+/// from a listener PID that does not match `MainPID`,
+/// `docs/reconcile.v1.md`'s truth table) is **not** an idempotent no-op —
+/// `stop` still needs to attempt the real `supervisor::stop` call on our
+/// own Unit. Once that call is made, [`wait_for_stop`] decides completion
+/// from the Unit's own `ActiveState`, not this Health check.
 fn is_stopped(row: &StatusRow) -> bool {
     row.state == HealthState::Stopped
-}
-
-/// `stop`'s wait-loop completion, once a real `supervisor::stop` call has
-/// been made. `stop` only stops **our** Unit — it does not SIGTERM/
-/// SIGKILL a Foreign process (`docs/reconcile.v1.md`, "Lifecycle (not pure
-/// Reconcile)") — so a Foreign holder that keeps the configured port open
-/// after our Unit is gone (`error`/`port_in_use`, `source: none`) is a
-/// separate, pre-existing condition `stop` cannot wait out; it still
-/// counts as `stop` having done its job.
-///
-/// **Not** `!matches!(state, Running | Starting)` — `docs/reconcile.v1.md`'s
-/// truth table lets an *active* Unit report Health `error` too (e.g. our
-/// Unit is active but a mismatched listener holds the port,
-/// `source: unit`). Treating every `error` as "done" would let `stop`
-/// report success while our own Unit is still genuinely active. Instead:
-/// complete once the row is no longer attributed to our Unit at all
-/// (`source != Source::Unit`), or once Health has actually reached
-/// `stopped` (including the `deactivating` + closed-port + known-pid row,
-/// which is `Stopped`/`source: unit` — the Unit is on its way out and
-/// `docs/reconcile.v1.md`'s own table already calls that `stopped`).
-fn unit_no_longer_active(row: &StatusRow) -> bool {
-    row.source != Source::Unit || row.state == HealthState::Stopped
 }
 
 /// A reconciled row's own `error` is already stable — every `error.code`
@@ -621,9 +656,13 @@ fn wait_step(
 /// ... Default: 10000 (10s)"), short-circuiting on a reconciled row that
 /// already carries a terminal `error` ([`terminal_error_result`]).
 /// `timeout_code` is the `error.code` a caller reports when the deadline
-/// passes first with no terminal error — `start_timeout` for `start`,
-/// `unknown` for `stop` (the Status document's catalog has no dedicated
-/// "did not confirm stopped" code).
+/// passes first with no terminal error.
+///
+/// `start` only — `stop` waits with [`wait_for_stop`] instead, because
+/// short-circuiting on a reconciled row's `error` is only safe when that
+/// `error` is already a terminal classification. `docs/reconcile.v1.md`'s
+/// truth table lets an *active* Unit report Health `error` too, which a
+/// stop-in-progress Unit can genuinely produce mid-poll.
 fn wait_for(
     connection: &Connection,
     wait_ms: u64,
@@ -1081,67 +1120,71 @@ mod tests {
         );
     }
 
-    // -- unit_no_longer_active -------------------------------------------------
+    // -- unit_safely_recreatable ---------------------------------------------
 
-    #[test]
-    fn unit_no_longer_active_is_false_while_running_via_our_unit() {
-        let row = row(HealthState::Running, Source::Unit, None);
-        assert!(!unit_no_longer_active(&row));
+    fn loaded_snapshot(active_state: UnitActiveState, main_pid: Option<u32>) -> UnitSnapshot {
+        UnitSnapshot::Loaded {
+            active_state,
+            sub_state: "n/a".to_string(),
+            main_pid,
+            result: crate::supervisor::UnitResult::Success,
+            exec_outcome: crate::supervisor::ExecOutcome::NotExited,
+            started_at_monotonic_usec: None,
+        }
     }
 
     #[test]
-    fn unit_no_longer_active_is_false_while_starting() {
-        let row = row(HealthState::Starting, Source::Unit, None);
-        assert!(!unit_no_longer_active(&row));
+    fn unit_safely_recreatable_is_true_when_absent() {
+        assert!(unit_safely_recreatable(&UnitSnapshot::Absent));
     }
 
     #[test]
-    fn unit_no_longer_active_is_true_once_stopped() {
-        let row = row(HealthState::Stopped, Source::None, None);
-        assert!(unit_no_longer_active(&row));
+    fn unit_safely_recreatable_is_true_when_inactive() {
+        let snapshot = loaded_snapshot(UnitActiveState::Inactive, None);
+        assert!(unit_safely_recreatable(&snapshot));
     }
 
     #[test]
-    fn unit_no_longer_active_is_true_for_a_foreign_port_conflict_after_our_unit_is_gone() {
-        // `stop` cannot clear a Foreign holder (`docs/reconcile.v1.md`,
-        // "Lifecycle (not pure Reconcile)") — once our own Unit is no
-        // longer running/starting, `stop` has done everything it can.
-        let row = row(
-            HealthState::Error,
-            Source::None,
-            Some(StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "held by pid 999".to_string(),
-            }),
-        );
-        assert!(unit_no_longer_active(&row));
+    fn unit_safely_recreatable_is_false_while_deactivating() {
+        // The exact race this must-fix closes: Reconcile already reports
+        // Health `Stopped` for `deactivating` + a closed port
+        // (`docs/reconcile.v1.md`), but the Unit is still loaded and a
+        // fresh `StartTransientUnit` for it would fail with `UnitExists`.
+        let snapshot = loaded_snapshot(UnitActiveState::Deactivating, Some(123));
+        assert!(!unit_safely_recreatable(&snapshot));
     }
 
     #[test]
-    fn unit_no_longer_active_is_false_for_an_error_still_attributed_to_our_unit() {
-        // `docs/reconcile.v1.md`'s truth table lets an *active* Unit
-        // report Health `error` (e.g. our Unit is active but a mismatched
-        // listener holds the port, `source: unit`). `stop`'s wait loop
-        // must not treat that as "done" just because Health says `error`
-        // — our own Unit is still genuinely active.
-        let row = row(
-            HealthState::Error,
-            Source::Unit,
-            Some(StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "port 15432 held by docker-proxy (pid 4321)".to_string(),
-            }),
-        );
-        assert!(!unit_no_longer_active(&row));
+    fn unit_safely_recreatable_is_false_while_active() {
+        let snapshot = loaded_snapshot(UnitActiveState::Active, Some(123));
+        assert!(!unit_safely_recreatable(&snapshot));
     }
 
     #[test]
-    fn unit_no_longer_active_is_true_for_a_deactivating_unit_reconciled_as_stopped() {
-        // `docs/reconcile.v1.md`'s `deactivating` + closed port + known
-        // pid row is already `Stopped`/`source: unit` — the Unit is on its
-        // way out; `stop` should not keep polling it.
-        let row = row(HealthState::Stopped, Source::Unit, None);
-        assert!(unit_no_longer_active(&row));
+    fn unit_safely_recreatable_is_false_while_activating() {
+        let snapshot = loaded_snapshot(UnitActiveState::Activating, None);
+        assert!(!unit_safely_recreatable(&snapshot));
+    }
+
+    #[test]
+    fn unit_safely_recreatable_is_true_when_failed_with_no_live_process() {
+        // `start_transient` already best-effort `ResetFailedUnit`s before
+        // a fresh `StartTransientUnit`, so a failed Unit with no process
+        // left is safe to restart onto.
+        let snapshot = loaded_snapshot(UnitActiveState::Failed, None);
+        assert!(unit_safely_recreatable(&snapshot));
+    }
+
+    #[test]
+    fn unit_safely_recreatable_is_false_when_failed_with_a_live_process() {
+        let snapshot = loaded_snapshot(UnitActiveState::Failed, Some(123));
+        assert!(!unit_safely_recreatable(&snapshot));
+    }
+
+    #[test]
+    fn unit_safely_recreatable_is_false_for_an_unknown_active_state() {
+        let snapshot = loaded_snapshot(UnitActiveState::Unknown("reloading".to_string()), None);
+        assert!(!unit_safely_recreatable(&snapshot));
     }
 
     // -- terminal_error_result --------------------------------------------
