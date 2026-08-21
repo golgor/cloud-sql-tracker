@@ -25,7 +25,7 @@ cloud-sql-tracker   (this repo — stateless CLI)
 - **Control plane:** this CLI — config, lifecycle, health aggregation, stable JSON.
 - **View:** separate repo `cloud-sql-tracker-oma-plugin` — Omarchy bar only; no direct filesystem access to config.
 
-The CLI is **stateless and short-lived**: each invocation does one job and exits. Long-lived processes are only the proxies (under systemd user units). Rust module seams (pure Reconcile vs I/O adapters vs thin clap `cli`): [`docs/modules.v1.md`](./modules.v1.md).
+The CLI is **stateless and short-lived**: each invocation does one job and exits. Long-lived processes are only the proxies (under systemd user units). Rust module seams (pure Reconcile vs I/O adapters vs thin clap `cli`): [`docs/modules.v1.md`](./modules.v1.md). Test and dogfood proof bar: [`docs/verification.v1.md`](./verification.v1.md).
 
 ## Companion plugin
 
@@ -128,6 +128,14 @@ cloud-sql-tracker --version   # bare semver from Cargo.toml only
 - **No rollback** on partial multi-target failure (exit `1`); successes stay applied.
 - **`restart --failed`** — only cycle connections currently in Health state `error`.
 - Later (stretch): `config init|list|add|set|remove`.
+
+## Verification (frozen v1)
+
+What must be proven after implementation (not in this spec map): [`docs/verification.v1.md`](./verification.v1.md).
+
+- Required `cargo test`: config parse, reconcile truth table, Status/Doctor serde→schema, selector/`--failed`, `unit_name`, `--version` + a couple of exit-2 smokes.
+- Personal dogfood on 7 Connections; attest on the **implementation map**.
+- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) closes when contracts + this strategy are frozen. Building the CLI is a **new Wayfinder map**.
 
 ## Non-goals (v1)
 
