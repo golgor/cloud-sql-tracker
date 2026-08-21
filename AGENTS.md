@@ -2,6 +2,49 @@
 
 This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy processes. The Omarchy bar plugin is a **separate** repo: `cloud-sql-tracker-oma-plugin`.
 
+## Audience
+
+The operator is a **senior developer**. Treat design and trade-offs at that level.
+
+Experience that is already there:
+
+- Linux as a daily OS (Arch / Omarchy): packages, systemd as a user, files, permissions.
+- Containers and scripts. Not native Linux services.
+
+Experience that is **not** there:
+
+- Rust beyond basics (ownership, traits, Cargo features, MSRV).
+- Talking to the kernel or systemd from a program (`/proc`, D-Bus, zbus, transient Units, procfs).
+
+The operator wants to **learn** that native layer. When a Linux or Rust term first appears in chat, a research brief, or a PR comment, add **one short sentence** of what it is and why this Control plane uses it. Link a primary source (man page, systemd docs, The Rust Book, crate docs) when that helps. Do not skip D-Bus, Unit, `/proc`, clippy, or MSRV. Do not teach `pacman` or “what is a process.”
+
+## Writing (chat, issues, docs, PR comments)
+
+Use terms from [`CONTEXT.md`](./CONTEXT.md). Write in **[ASD-STE100](https://www.asd-ste100.org/) Simplified Technical English** (controlled English for technical docs: short sentences, one idea each, same word for the same thing):
+
+- Use short sentences. Put one idea in each sentence.
+- Use the same word for the same thing.
+- Use active voice. Do not use slang or idioms.
+
+When you state a **choice**, use this order:
+
+1. **Pick** — what we use.
+2. **Why** — one reason.
+3. **Discarded** — what we do not use, and why (one line).
+4. **Unchanged** — what this choice does not change.
+
+Start with the Pick. Wrong: “Not nextest; no cargo-watch; mise wraps cargo.” Right:
+
+> **Pick:** mise tasks wrap cargo. **Why:** one toolchain and the same commands locally and in CI. **Discarded:** nextest (crate is small). **Unchanged:** `cargo test` stays the bar.
+
+**Research briefs** live in [`docs/research/`](./docs/research/). They are human prose. Do not put subagent `acceptance-report` JSON or `/tmp` paths in them. Crate and toolchain numbers in a brief are **snapshots**. On the **implementation ticket**, under `## Question`, put:
+
+- **Brief:** path to `docs/research/…`
+- **Gist:** Pick in one line
+- **Pin:** the crate or toolchain version this slice locks (or “pin then-current X.Y when landing”)
+
+Do not point only at a closed GitHub issue.
+
 ## Git workflow (PRs)
 
 - Do **not** commit product/docs freezes straight to `main` when collaborating via history-friendly flow.
@@ -32,7 +75,7 @@ This repo is the **control plane CLI** for multiple Google Cloud SQL Auth Proxy 
 | [`examples/logs.v1.txt`](./examples/logs.v1.txt) | Sample plain-text logs transcript |
 | [`docs/modules.v1.md`](./docs/modules.v1.md) | **Rust module seams** (`src/` layout, pure vs I/O) |
 | [`docs/verification.v1.md`](./docs/verification.v1.md) | **Test + dogfood strategy** (cargo bar, human gate, next map) |
-| [`docs/research/`](./docs/research/) | systemd / port / journal research |
+| [`docs/research/`](./docs/research/) | Adapter I/O, CI/dev-loop, crates. **Read the matching brief** before working on that implementation ticket. |
 
 ## Contract artifacts (keep in sync)
 
@@ -92,13 +135,13 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 - Stateless CLI; long-lived work is `cloud-sql-proxy` under `systemd --user`.
 - ADC is a hard requirement ([ADR 0002](./docs/adr/0002-adc-only-auth.md)).
 - v1 health = **our Unit** + local TCP accept; no Orphan adopt ([ADR 0003](./docs/adr/0003-local-health-signals.md), [`reconcile.v1.md`](./docs/reconcile.v1.md)).
-- Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)).
+- Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)). v1 Supervisor I/O is **zbus** on the user bus ([`docs/research/supervisor-io.md`](./docs/research/supervisor-io.md)) — not `systemctl` / `systemd-run`. `logs` still uses `journalctl`.
 - Module seams: [`docs/modules.v1.md`](./docs/modules.v1.md) — clap stays in `cli`; Reconcile is pure; no traits until a second adapter exists.
 - Test / dogfood: [`docs/verification.v1.md`](./docs/verification.v1.md) — required `cargo test` list + human dogfood; implementation map inherits this; do not close [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) on golden-only.
 
 ## Wayfinder
 
-- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) is **closed**. Implementation is a **new map** (`/wayfinder`). Do not reopen #2 as parent.
+- Spec map [#2](https://github.com/golgor/cloud-sql-tracker/issues/2) is **closed**. Implementation map is [#28](https://github.com/golgor/cloud-sql-tracker/issues/28). Do not reopen #2 as parent.
 - Planning decisions live on GitHub issues (map label `wayfinder:map`). Do not re-litigate closed tickets without an explicit reopen.
 - **One map, one job.** Spec freeze ≠ cargo-test-green. Proof lives on the implementation map ([`docs/verification.v1.md`](./docs/verification.v1.md)).
 
