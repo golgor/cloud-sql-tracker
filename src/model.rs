@@ -7,14 +7,19 @@
 //! are owned here via `serde::Serialize`, not by `commands` — this is the
 //! one place that knows both the Rust name and the wire name.
 
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 
 /// The systemd `--user` unit name for one Connection's managed Proxy process.
 ///
 /// Always `cloud-sql-proxy-<sanitized-id>.service`. `supervisor`, `journal`,
 /// and the Status `unit` field all go through [`unit_name`] so the string is
 /// assembled in exactly one place.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `#[serde(transparent)]`: a `UnitName` is always a plain string on the
+/// wire (e.g. the Status document's `unit` field) — never the newtype
+/// wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
 pub(crate) struct UnitName(String);
 
 impl UnitName {
@@ -26,17 +31,6 @@ impl UnitName {
 impl std::fmt::Display for UnitName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-/// A `UnitName` is always a plain string on the wire (e.g. the Status
-/// document's `unit` field) — never the newtype wrapper.
-impl Serialize for UnitName {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
     }
 }
 
