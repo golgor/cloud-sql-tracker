@@ -162,5 +162,5 @@ Prefer a short named function over a clever one-liner, a generic, or a macro. Na
 - **Implement** with a Sonnet-5 subagent on a worktree. Parent does not write product code.
 - When the implementer is done: dual GitHub review — **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth / **Code style**). Paste the issue body and `git diff origin/main...HEAD` (reviewers often have no `gh`).
 - Must-fix → Sonnet-5 again on the same branch. Repeat until **both** reviewers and the coder are satisfied.
-- Reviewers are read-only. Human squash-merges.
+- Reviewers are read-only. A human performs the squash-merge.
 - When a freeze requires tests, name the **pure fn** (do not invite a test trait).
