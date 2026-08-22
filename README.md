@@ -51,12 +51,40 @@ One-liner scripts like `cloud-sql-proxy project:region:instance` all default to 
 - `status --json` for bars and scripts
 - port-conflict detection when something else already holds a Connection’s port
 
-## Install (planned)
+## Install
+
+### From source (dogfood / development)
 
 ```bash
-# once implemented
-cargo install --path .
-# or download a release binary to ~/.local/bin
+cargo install --path . --locked
+```
+
+Pinned tag (after a release exists):
+
+```bash
+cargo install --git https://github.com/golgor/cloud-sql-tracker \
+  --tag v0.1.0 --locked
+```
+
+### From a GitHub Release (Linux x86_64)
+
+Each tag `vX.Y.Z` (matching `Cargo.toml` `[package].version`) publishes a Release asset:
+
+- `cloud-sql-tracker-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `SHA256SUMS`
+
+```bash
+# example for v0.1.0 — replace the version to match the Release
+VERSION=0.1.0
+ARCHIVE=cloud-sql-tracker-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz
+
+curl -fsSL -O "https://github.com/golgor/cloud-sql-tracker/releases/download/v${VERSION}/${ARCHIVE}"
+curl -fsSL -O "https://github.com/golgor/cloud-sql-tracker/releases/download/v${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
+
+tar -xzf "$ARCHIVE"
+install -Dm755 cloud-sql-tracker ~/.local/bin/cloud-sql-tracker
+cloud-sql-tracker --version   # bare X.Y.Z
 ```
 
 Requires:
@@ -64,6 +92,8 @@ Requires:
 - `cloud-sql-proxy` on `PATH`
 - systemd user session (typical desktop login on Arch/Omarchy)
 - Application Default Credentials (`gcloud auth application-default login`) for the proxy itself
+
+Release build notes: [docs/research/release-build.md](docs/research/release-build.md).
 
 ## Config
 
