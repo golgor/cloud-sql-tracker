@@ -1,5 +1,7 @@
 # Research: v1 release artifacts and AUR
 
+**Companion:** release profile, measured binary size, and Part B release-job sketch live in [`release-build.md`](./release-build.md).
+
 ## Summary
 
 For v1 dogfood, use `cargo install --path . --locked`; after the first release tag, document a pinned Git install (`cargo install --git … --tag v0.1.0 --locked`) and optionally attach one versioned Arch-compatible `x86_64-unknown-linux-gnu` binary archive plus checksum to the GitHub Release. Defer AUR until there is real demand for pacman/AUR-helper lifecycle management: it adds a second maintained repository and release chore but does not improve the CLI's runtime behavior.
