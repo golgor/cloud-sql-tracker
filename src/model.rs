@@ -270,6 +270,7 @@ pub(crate) struct StatusRow {
     pub(crate) address: String,
     pub(crate) port: u16,
     pub(crate) private_ip: bool,
+    pub(crate) enabled: bool,
     pub(crate) state: HealthState,
     pub(crate) source: Source,
     pub(crate) pid: Option<u32>,
