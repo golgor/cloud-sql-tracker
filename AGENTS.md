@@ -56,6 +56,7 @@ Do not point only at a closed GitHub issue.
 - After merge, update that map’s **Decisions so far** in the **same session**. GitHub may auto-close a parent map when the last child closes — still edit the body.
 - Parallel PRs that both touch `src/lib.rs`, `src/commands.rs`, or `Cargo.lock`: merge **one at a time**; rebase the rest onto `main` (keep every `mod` line).
 - Implement on a **git worktree**. After merge or abandon: `git worktree remove --force <path>`, then `git branch -D`. `branch -D` fails while a worktree still holds the branch.
+- Pushing `.github/workflows/**` needs the **`workflow` OAuth scope**. The `gh` HTTPS credential-helper token does not have it, and `url.https://github.com/.insteadof git@github.com:` rewrites SSH back to HTTPS, so plain `git push git@…` still fails. Push those branches over SSH explicitly: `git push ssh://git@github.com/golgor/cloud-sql-tracker.git HEAD:refs/heads/<branch>`.
 
 ## Read before changing contracts
 
@@ -118,6 +119,7 @@ If a JSON field is unclear, **open the status prose** — do not guess from the 
 ## Version string (single source)
 
 - Bump **`Cargo.toml` `[package].version` only** for releases.
+- Regenerate **`Cargo.lock` in the same commit** (build once, or `cargo update -p cloud-sql-tracker`). `release.yml` runs `cargo test --locked`; a stale lock fails the Release job **after** the tag is already pushed ([#79](https://github.com/golgor/cloud-sql-tracker/issues/79)).
 - `--version` / `-V` and Status `cli_version` must use `CARGO_PKG_VERSION` (or equivalent) — never a second hard-coded version in `main.rs`.
 - GitHub Release tags should match that package version (`v0.1.0` ↔ `0.1.0`).
 
@@ -167,6 +169,7 @@ In-process serde is not Layer 2. Goldens-only is not Layer 2. Landing `commands`
 - Prefer native Linux I/O over scraping `ss`/`pgrep` ([ADR 0004](./docs/adr/0004-rust-toolchain-and-linux-io.md)). v1 Supervisor I/O is **zbus** on the user bus ([`docs/research/supervisor-io.md`](./docs/research/supervisor-io.md)) — not `systemctl` / `systemd-run`. `logs` still uses `journalctl`.
 - Module seams: [`docs/modules.v1.md`](./docs/modules.v1.md) — clap stays in `cli`; Reconcile is pure; no traits until a second adapter exists.
 - Test / dogfood: [`docs/verification.v1.md`](./docs/verification.v1.md) — required `cargo test` list + human dogfood; implementation map inherits this; do not close [#23](https://github.com/golgor/cloud-sql-tracker/issues/23) on golden-only **or** in-process serde alone.
+- State latency in **measured ms**, not adjectives. `doctor` is the plugin's panel-open preflight and `status` is bar-polled, so overhead is user-visible. Benchmark before and after, and put the numbers in the PR.
 
 ## Wayfinder
 
@@ -177,11 +180,16 @@ In-process serde is not Layer 2. Goldens-only is not Layer 2. Landing `commands`
 ## Implement / review loop
 
 - **Implement** with a Sonnet-5 subagent on a worktree. Parent does not write product code.
-- When the implementer is done: dual GitHub review — **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth / **Code style**). Paste the issue body and `git diff origin/main...HEAD` (reviewers often have no `gh`).
+- When the implementer is done: dual GitHub review — **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth / **Code style**). Give both the branch as a **worktree** (next bullet), not only a pasted diff.
+- Reviewers and researchers usually have **no shell**. Give them a **git worktree** of the branch plus evidence files inside it: `git worktree add ../cloud-sql-tracker-<n> <branch>`, then write `REVIEW_DIFF.patch` and the issue body there. A pasted diff alone blocks them as soon as they need to read a neighbouring file. Do not commit those scratch files.
+- Measurements are the **parent's or implementer's** job. A research subagent cannot run `cargo`; hand it the numbers to write up.
 - Must-fix → Sonnet-5 again on the same branch. Repeat until **both** reviewers and the coder are satisfied.
 - Reviewers are read-only. A human performs the squash-merge.
 - When a freeze requires tests, name the **pure fn** (do not invite a test trait).
 - Judge review comments against the **current branch tip**. Bot or stale comments may describe code that a later commit already fixed.
+- **Verify a must-fix's premise before applying it.** A review claimed that fsync plus atomic rename removed a test `ETXTBSY` flake. Measurement said otherwise: `main` was 10/10 clean and the change was 5/10 failing, so the real cause was fork/exec contention across test threads ([#82](https://github.com/golgor/cloud-sql-tracker/issues/82)). Keep the reviewer's **goal**; fix the **reason**. Escalate — do not silently comply, and do not silently ignore.
+- **One mitigation per problem.** When two guards address one cause, keep the one that holds and delete the other. This applies to test code too.
+- **Test-only workarounds stay in `#[cfg(test)]`.** Production must not carry error handling shaped by test setup.
 
 ### Bugfix (product)
 
