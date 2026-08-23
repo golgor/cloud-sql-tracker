@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Reference &rsaquo; Glossary</p>
+
+<header class="book-head">
+  <p class="kicker">Quick Reference</p>
+  <h1>Glossary</h1>
+  <p class="lede">Authoritative definitions for every domain term, system concept, and infrastructure pattern used throughout cloud-sql-tracker and this textbook.</p>
+</header>
+
+<p>Every concept in this codebase maps to an exact vocabulary defined in <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/CONTEXT.md"><code>CONTEXT.md</code></a>. Using precise names prevents architectural drift between the CLI control plane, systemd, the desktop bar widget, and background proxy processes.</p>
+
+<dl>
+  <dt id="adc">ADC (Application Default Credentials)</dt>
+  <dd>
+    <p>Google Cloud's standard credential discovery strategy. Client libraries and the <code>cloud-sql-proxy</code> binary search for credentials in a defined order: first checking the <code>GOOGLE_APPLICATION_CREDENTIALS</code> environment variable, and falling back to a default JSON file at <code>~/.config/gcloud/application_default_credentials.json</code> (generated via <code>gcloud auth application-default login</code>). In cloud-sql-tracker, ADC is a hard operational prerequisite (<a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0002-adc-only-auth.md">ADR 0002</a>); the control plane verifies local credential presence without initiating network calls or token exchanges.</p>
+    <p><strong>Codebase:</strong> <code>src/env/mod.rs</code> (<code>AdcStatus</code>, <code>adc_check</code>), <code>src/commands/doctor.rs</code>.</p>
+    <p><strong>Avoid:</strong> "gcloud login" (which authenticates the <code>gcloud</code> CLI, not necessarily ADC libraries), service account keys embedded in config.</p>
+  </dd>
+
+  <dt id="cgroup">cgroup (Control Group)</dt>
+  <dd>
+    <p>A Linux kernel feature that isolates, prioritizes, and accounts for resource usage across a tree of processes. Systemd places each transient service unit inside its own dedicated cgroup. When cloud-sql-tracker configures <code>KillMode=control-group</code>, stopping a unit signals every process inside that cgroup (including helper subprocesses spawned by wrapper scripts), preventing leaked background orphans.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code> (transient unit properties: <code>KillMode=control-group</code>).</p>
+  </dd>
+
+  <dt id="connection">Connection</dt>
+  <dd>
+    <p>A configured target Cloud SQL instance paired with a unique, non-default local listen endpoint. Identified by a unique slug (such as <code>fe-dev</code> or <code>backend-prod</code>), containing an instance connection string (<code>project:region:instance</code>), a fixed port (e.g. <code>15432</code>), a group tag, and optional flags like <code>private_ip</code> or <code>auto_iam_authn</code>.</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code> (<code>struct Connection</code>), <code>src/config.rs</code>.</p>
+    <p><strong>Avoid:</strong> Service, database (which refers to the remote engine), tunnel.</p>
+  </dd>
+
+  <dt id="control-plane">Control plane</dt>
+  <dd>
+    <p>The short-lived, stateless command-line tool (<code>cloud-sql-tracker</code>) that starts, stops, observes, and reports on Google Cloud SQL Auth Proxy instances. The control plane manages metadata and lifecycle, but never handles database traffic, TCP proxying, or encryption itself.</p>
+    <p><strong>Codebase:</strong> <code>src/main.rs</code>, <code>src/cli.rs</code>, <code>src/commands.rs</code>.</p>
+    <p><strong>Avoid:</strong> Daemon (cloud-sql-tracker exits immediately after executing a command), agent, wrapper script.</p>
+  </dd>
+
+  <dt id="d-bus">D-Bus</dt>
+  <dd>
+    <p>The standard Linux inter-process communication (IPC) message bus system. It allows desktop programs and CLI tools to invoke methods and query properties on running services. cloud-sql-tracker talks to systemd's user manager over the session/user bus at the well-known destination <code>org.freedesktop.systemd1</code> using the pure-Rust <code>zbus</code> crate, avoiding shell-outs to <code>systemctl</code> or <code>systemd-run</code>.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code> (<code>zbus::blocking::Connection</code>, D-Bus method calls like <code>StartTransientUnit</code> and <code>StopUnit</code>).</p>
+  </dd>
+
+  <dt id="foreign-process">Foreign process</dt>
+  <dd>
+    <p>Any process listening on a Connection's designated local TCP port that does not belong to this control plane's managed systemd unit. This includes unmanaged manual invocations of <code>cloud-sql-proxy</code>, local Docker Compose containers, PostgreSQL servers, or stray background scripts. Reconcile classifies these as port conflicts (<code>HealthState::Error</code> with <code>ErrorCode::PortInUse</code>).</p>
+    <p><strong>Codebase:</strong> <code>src/reconcile.rs</code>, <code>src/port.rs</code> (listener attribution via <code>procfs</code>).</p>
+    <p><strong>Avoid:</strong> Orphan (cloud-sql-tracker does not adopt unmanaged processes), stranger.</p>
+  </dd>
+
+  <dt id="golden-example">Golden example</dt>
+  <dd>
+    <p>A reference sample document stored in the repository (e.g. <code>examples/status.v1.json</code>, <code>examples/connections.json</code>, <code>examples/doctor.v1.json</code>) that represents a valid, canonical output or input. Every contract change requires updating the prose document, the JSON schema, and the golden example together in the same pull request.</p>
+    <p><strong>Codebase:</strong> <code>examples/*.json</code>, <code>scripts/validate-contracts.sh</code>.</p>
+  </dd>
+
+  <dt id="group">Group</dt>
+  <dd>
+    <p>A logical string label attached to Connections in configuration (such as <code>fe</code>, <code>backend</code>, or <code>iot</code>). Groups allow bulk lifecycle operations in the CLI (e.g. <code>cloud-sql-tracker start --group backend</code>) and category-level aggregation in UI widgets.</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code>, <code>src/config.rs</code>, <code>src/commands/select.rs</code>.</p>
+    <p><strong>Avoid:</strong> Environment, project (the GCP project is part of the instance connection string).</p>
+  </dd>
+
+  <dt id="health-state">Health state</dt>
+  <dd>
+    <p>The operational state of a Connection at a single moment in time, produced by Reconcile. Exactly one of four states: <code>stopped</code> (no unit running, port closed), <code>starting</code> (unit activating or newly active within the 10-second start window), <code>running</code> (unit active and listening on the configured port), or <code>error</code> (crashed, timed out, port conflict, or execution failure).</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code> (<code>enum HealthState</code>), <code>src/reconcile.rs</code>.</p>
+    <p><strong>Avoid:</strong> Status (ambiguous with the entire Status document), phase.</p>
+  </dd>
+
+  <dt id="layer-1">Layer 1 (Contract verification)</dt>
+  <dd>
+    <p>Static schema validation executed in CI and pre-push hooks. Validates that all repository golden example files (<code>examples/*.json</code>) strictly conform to their corresponding JSON schemas (<code>schemas/*.json</code>) using <code>check-jsonschema</code>.</p>
+    <p><strong>Codebase:</strong> <code>scripts/validate-contracts.sh</code>, <code>.github/workflows/ci.yml</code>.</p>
+  </dd>
+
+  <dt id="layer-2">Layer 2 (Contract verification)</dt>
+  <dd>
+    <p>Integration testing of the compiled binary. Tests spawn the built executable (<code>cloud-sql-tracker status --json</code>, <code>doctor --json</code>) and validate its real <code>stdout</code> output directly against the JSON schema definitions using the in-process <code>jsonschema</code> crate.</p>
+    <p><strong>Codebase:</strong> <code>tests/cli_json_contracts.rs</code>.</p>
+  </dd>
+
+  <dt id="msrv">MSRV (Minimum Supported Rust Version)</dt>
+  <dd>
+    <p>The oldest version of the Rust compiler guaranteed to compile the project. cloud-sql-tracker pins MSRV (currently <code>1.97.1</code>) across three files in strict synchronization: <code>Cargo.toml</code> (<code>rust-version</code>), <code>mise.toml</code> (<code>tools.rust</code>), and <code>.github/workflows/ci.yml</code> (<code>env.RUST_VERSION</code>).</p>
+    <p><strong>Codebase:</strong> <code>Cargo.toml</code>, <code>mise.toml</code>, <code>.github/workflows/ci.yml</code>.</p>
+  </dd>
+
+  <dt id="procfs">procfs</dt>
+  <dd>
+    <p>The Linux virtual filesystem mounted at <code>/proc</code> that presents kernel and process data structures as file hierarchies. Used by the <code>port</code> adapter (via the Rust <code>procfs</code> crate) to inspect <code>/proc/net/tcp</code> for listening sockets and <code>/proc/&lt;pid&gt;/fd/</code> to attribute open socket file descriptors to owning PIDs and process names (<code>/proc/&lt;pid&gt;/comm</code>).</p>
+    <p><strong>Codebase:</strong> <code>src/port.rs</code>.</p>
+  </dd>
+
+  <dt id="proxy-process">Proxy process</dt>
+  <dd>
+    <p>An operating system process running Google's official <code>cloud-sql-proxy</code> executable, dedicated to handling traffic for exactly one Connection under a transient systemd service unit.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code> (<code>proxy_argv</code>), <code>src/env/mod.rs</code>.</p>
+    <p><strong>Avoid:</strong> Daemon, tracker process.</p>
+  </dd>
+
+  <dt id="reconcile">Reconcile</dt>
+  <dd>
+    <p>The pure, read-only decision engine that maps a Connection's configuration identity and observed runtime signals (systemd unit state, start time, TCP probe liveness, socket listener PID) to a definitive Health state and error classification. Reconcile performs zero I/O, does not read clocks directly, and never adopts foreign processes.</p>
+    <p><strong>Codebase:</strong> <code>src/reconcile.rs</code> (<code>pub(crate) fn reconcile</code>), <code>docs/reconcile.v1.md</code>.</p>
+    <p><strong>Avoid:</strong> Desired-state loop, controller, reconciliation daemon, auto-heal engine.</p>
+  </dd>
+
+  <dt id="source">Source</dt>
+  <dd>
+    <p>A field in the Status document indicating whether a Connection's reported Health state is backed by an active, managed systemd unit (<code>unit</code>) or by no managed process (<code>none</code>).</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code> (<code>enum Source</code>), <code>src/reconcile.rs</code>.</p>
+    <p><strong>Avoid:</strong> Origin, provider, parent, orphan.</p>
+  </dd>
+
+  <dt id="status-document">Status document</dt>
+  <dd>
+    <p>The versioned JSON document emitted on stdout when running <code>cloud-sql-tracker status --json</code>. Contains root metadata (<code>version: 1</code>, <code>cli_version</code>, <code>generated_at</code>), an array of per-Connection status objects, and summary state tallies for UI consumption.</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code> (<code>struct StatusDocument</code>), <code>src/commands/status.rs</code>, <code>docs/status-document.v1.md</code>.</p>
+    <p><strong>Avoid:</strong> State file (the control plane stores no state on disk), report, ping response.</p>
+  </dd>
+
+  <dt id="supervisor">Supervisor</dt>
+  <dd>
+    <p>The Linux user-level service manager (<code>systemd --user</code>) acting as the durable parent process for all proxy instances. The supervisor manages process execution, automatic SIGTERM shutdown, cgroup isolation, and journal logging.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code>, <code>docs/research/supervisor-io.md</code>.</p>
+    <p><strong>Avoid:</strong> Our CLI (the CLI is short-lived; systemd is the supervisor).</p>
+  </dd>
+
+  <dt id="transient-unit">Transient unit</dt>
+  <dd>
+    <p>A systemd service unit created dynamically in memory via the D-Bus method <code>StartTransientUnit</code> (named <code>cloud-sql-proxy-&lt;id&gt;.service</code>). Transient units do not require unit files on disk in <code>~/.config/systemd/user/</code> and are cleaned up automatically when stopped.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code> (<code>start_transient</code>), <code>docs/research/systemd-user-units.md</code>.</p>
+  </dd>
+
+  <dt id="unit">Unit</dt>
+  <dd>
+    <p>The transient systemd user service instance (<code>cloud-sql-proxy-&lt;id&gt;.service</code>) created and supervised by <code>systemd --user</code> to run a single proxy process.</p>
+    <p><strong>Codebase:</strong> <code>src/model.rs</code> (<code>struct UnitName</code>), <code>src/supervisor.rs</code>.</p>
+    <p><strong>Avoid:</strong> Service (alone), background job.</p>
+  </dd>
+
+  <dt id="user-bus">User bus</dt>
+  <dd>
+    <p>The per-user D-Bus session bus instance established at graphical login or via systemd lingering. Accessible via the socket at <code>$XDG_RUNTIME_DIR/bus</code>, enabling unprivileged user tools to interact with user-level services and managers.</p>
+    <p><strong>Codebase:</strong> <code>src/supervisor.rs</code> (<code>zbus::blocking::Connection::user()</code>).</p>
+  </dd>
+
+  <dt id="xdg-config-path">XDG config path</dt>
+  <dd>
+    <p>The standard directory for user-specific configuration files per the XDG Base Directory Specification. cloud-sql-tracker defaults to <code>$XDG_CONFIG_HOME/cloud-sql-tracker/connections.json</code> (falling back to <code>~/.config/cloud-sql-tracker/connections.json</code>).</p>
+    <p><strong>Codebase:</strong> <code>src/config.rs</code> (<code>default_path()</code>).</p>
+  </dd>
+</dl>
+
+<footer class="book-foot">
+  <p>Source: <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/CONTEXT.md">CONTEXT.md</a> and repository architecture documentation.</p>
+  <p>Have a question about a term not defined here? Ask your teacher for clarification.</p>
+</footer>
+
+</body>
+</html>

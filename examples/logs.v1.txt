@@ -1,5 +1,5 @@
 2026-08-20T19:40:01+02:00 hostname cloud-sql-proxy[12002]: Authorizing with Application Default Credentials
-2026-08-20T19:40:01+02:00 hostname cloud-sql-proxy[12002]: [toolsense-dev:europe-west1:toolsense-2] Listening on 127.0.0.1:15434
-2026-08-20T19:40:12+02:00 hostname cloud-sql-proxy[12002]: [toolsense-dev:europe-west1:toolsense-2] accepted connection from 127.0.0.1:54321
-2026-08-20T19:41:00+02:00 hostname cloud-sql-proxy[12002]: [toolsense-dev:europe-west1:toolsense-2] client closed the connection
+2026-08-20T19:40:01+02:00 hostname cloud-sql-proxy[12002]: [acme-dev:europe-west1:frontend-db-1] Listening on 127.0.0.1:15434
+2026-08-20T19:40:12+02:00 hostname cloud-sql-proxy[12002]: [acme-dev:europe-west1:frontend-db-1] accepted connection from 127.0.0.1:54321
+2026-08-20T19:41:00+02:00 hostname cloud-sql-proxy[12002]: [acme-dev:europe-west1:frontend-db-1] client closed the connection
 2026-08-20T19:45:00+02:00 hostname cloud-sql-proxy[12002]: SIGTERM received, shutting down

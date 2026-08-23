@@ -13,49 +13,49 @@
       "id": "backend-dev",
       "name": "Backend Dev",
       "group": "backend",
-      "instance": "toolsense-dev:europe-west1:backend-postgres-1",
+      "instance": "acme-dev:europe-west1:backend-db-1",
       "port": 15432
     },
     {
       "id": "backend-prod",
       "name": "Backend Prod",
       "group": "backend",
-      "instance": "toolsense:europe-west1:toolsense-3",
+      "instance": "acme-prod:europe-west1:backend-db-prod",
       "port": 15433
     },
     {
       "id": "fe-dev",
       "name": "FE Dev",
       "group": "fe",
-      "instance": "toolsense-dev:europe-west1:toolsense-2",
+      "instance": "acme-dev:europe-west1:frontend-db-1",
       "port": 15434
     },
     {
       "id": "fe-prod",
       "name": "FE Prod",
       "group": "fe",
-      "instance": "toolsense:europe-west1:toolsense-2-replica-2",
+      "instance": "acme-prod:europe-west1:frontend-db-replica",
       "port": 15435
     },
     {
       "id": "fe-rw-prod",
       "name": "FE RW Prod",
       "group": "fe",
-      "instance": "toolsense:europe-west1:toolsense-2",
+      "instance": "acme-prod:europe-west1:frontend-db-main",
       "port": 15436
     },
     {
       "id": "iot-dev",
       "name": "IoT Dev",
       "group": "iot",
-      "instance": "toolsense-iot-dev:europe-west1:postgres-development",
+      "instance": "acme-iot-dev:europe-west1:iot-db-dev",
       "port": 15437
     },
     {
       "id": "iot-prod",
       "name": "IoT Prod",
       "group": "iot",
-      "instance": "toolsense-iot:europe-west1:postgres-production",
+      "instance": "acme-iot-prod:europe-west1:iot-db-prod",
       "port": 15438
     }
   ]

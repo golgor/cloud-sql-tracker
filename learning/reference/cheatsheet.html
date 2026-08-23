@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cheat Sheet — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Reference &rsaquo; Cheat Sheet</p>
+
+<header class="book-head">
+  <p class="kicker">Quick Reference</p>
+  <h1>Cheat Sheet</h1>
+  <p class="lede">Comprehensive operator and developer quick reference: subcommands, exit codes, health states, preflight checks, module boundaries, system paths, and release workflows.</p>
+</header>
+
+<h2>1. Subcommands &amp; Argv Syntax</h2>
+
+<p>Global flags: <code>--config PATH</code>, <code>-h</code> / <code>--help</code>, <code>-V</code> / <code>--version</code> (prints bare semver). Mass mutations require an explicit target (<code>ID</code>, <code>--group NAME</code>, or <code>--all</code>); target selectors are mutually exclusive.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Subcommand</th>
+      <th>Argv Signature</th>
+      <th>Default Target</th>
+      <th>Key Options</th>
+      <th>Purpose &amp; Output</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>status</code></td>
+      <td><code>status [--json] [ID | --group G | --all]</code></td>
+      <td><code>--all</code></td>
+      <td><code>--json</code></td>
+      <td>Inspects systemd and TCP sockets via Reconcile. Emits human table or machine Status document (v1 schema).</td>
+    </tr>
+    <tr>
+      <td><code>start</code></td>
+      <td><code>start &lt;ID | --group G | --all&gt;</code></td>
+      <td><em>Required</em></td>
+      <td><code>--wait-ms &lt;ms&gt;</code> (10000)</td>
+      <td>Spawns transient user units (<code>Type=exec</code>) via D-Bus; polls up to <code>--wait-ms</code> until TCP port accepts.</td>
+    </tr>
+    <tr>
+      <td><code>stop</code></td>
+      <td><code>stop &lt;ID | --group G | --all&gt;</code></td>
+      <td><em>Required</em></td>
+      <td><code>--wait-ms &lt;ms&gt;</code> (10000)</td>
+      <td>Stops transient user units via D-Bus; cleans up failed state; polls until unit is absent and port is closed.</td>
+    </tr>
+    <tr>
+      <td><code>restart</code></td>
+      <td><code>restart [--failed] &lt;ID | --group G | --all&gt;</code></td>
+      <td><em>Required</em></td>
+      <td><code>--failed</code>, <code>--wait-ms &lt;ms&gt;</code></td>
+      <td>Stops then starts targets. With <code>--failed</code>, filters batch to only connections currently in Health state <code>error</code>.</td>
+    </tr>
+    <tr>
+      <td><code>logs</code></td>
+      <td><code>logs &lt;ID&gt; [-n &lt;lines&gt;]</code></td>
+      <td><em>Single ID only</em></td>
+      <td><code>-n &lt;lines&gt;</code> (100)</td>
+      <td>Dumps captured systemd user journal entries for the connection's unit using <code>journalctl</code> in ISO timestamp format.</td>
+    </tr>
+    <tr>
+      <td><code>doctor</code></td>
+      <td><code>doctor [--json]</code></td>
+      <td><em>Entire host</em></td>
+      <td><code>--json</code></td>
+      <td>Runs six preflight checks (config, proxy binary version probe, systemd D-Bus, ADC, journald, port conflicts).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>2. Process Exit Codes</h2>
+
+<p>Multi-target mutations are not transactional: successes stay running on partial failures. Exit code reflects overall batch outcome.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Classification Rules</th>
+      <th>Concrete Examples</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>0</code></td>
+      <td><strong>Success</strong></td>
+      <td>All requested operations succeeded, or idempotent no-op (e.g. starting an already-running connection, stopping an already-stopped connection, <code>restart --failed</code> with 0 failed units, or <code>status</code> completed).</td>
+      <td><code>start --all</code> (7/7 ok); <code>start fe-dev</code> (already running); <code>logs fe-dev</code> (empty or non-empty journal).</td>
+    </tr>
+    <tr>
+      <td><code>1</code></td>
+      <td><strong>Partial Failure</strong></td>
+      <td>Multi-target batch where at least one target succeeded and at least one target failed. Survivors remain in their new state. (Never emitted by single-ID commands or <code>logs</code>).</td>
+      <td><code>start --all</code> (6 connections started successfully, 1 failed to bind port).</td>
+    </tr>
+    <tr>
+      <td><code>2</code></td>
+      <td><strong>Usage / Config Error</strong></td>
+      <td>Invalid command-line arguments, unknown flags, missing target selector on mutate, conflicting selectors (e.g. <code>fe-dev --all</code>), unknown connection ID/group, targeting a disabled ID, or invalid/unparseable config JSON.</td>
+      <td><code>start</code> (missing target); <code>start unknown-id</code>; <code>connections.json</code> containing unknown keys; <code>logs -n 0</code>.</td>
+    </tr>
+    <tr>
+      <td><code>3</code></td>
+      <td><strong>Dependency Error</strong></td>
+      <td>Environmental / external failure preventing whole-command execution: D-Bus systemd user bus unreachable, ADC credentials missing/unreadable, proxy binary unresolvable on start, or <code>journalctl</code> missing from <code>PATH</code>.</td>
+      <td><code>start --all</code> when <code>systemd --user</code> is down; <code>doctor</code> with broken ADC; <code>logs fe-dev</code> without <code>journalctl</code>.</td>
+    </tr>
+    <tr>
+      <td><code>4</code></td>
+      <td><strong>Total Failure</strong></td>
+      <td>Every attempted target in a multi-target batch failed, or a single-ID mutating operation failed during execution.</td>
+      <td><code>start fe-dev</code> (port conflict with foreign process); <code>start --group backend</code> (0/2 connections succeeded).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>3. Health States &amp; Error Classifications</h2>
+
+<p>Produced deterministically by <code>reconcile()</code> from systemd unit state, start timestamp, TCP port liveness, and listener PID attribution.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Health State</th>
+      <th>Source</th>
+      <th>Unit ActiveState</th>
+      <th>TCP Probe</th>
+      <th>Evaluation Logic &amp; Error Code</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>stopped</code></td>
+      <td><code>none</code></td>
+      <td><code>inactive</code> / absent</td>
+      <td>Closed</td>
+      <td>Unit is absent or cleanly stopped (exited with code <code>0</code> or <code>143</code> / <code>SIGTERM</code>); local port is closed.</td>
+    </tr>
+    <tr>
+      <td><code>starting</code></td>
+      <td><code>unit</code></td>
+      <td><code>activating</code> / <code>active</code></td>
+      <td>Closed</td>
+      <td>Unit is activating or active, but age is within <code>START_WINDOW</code> (10,000 ms) and TCP port has not opened yet.</td>
+    </tr>
+    <tr>
+      <td><code>running</code></td>
+      <td><code>unit</code></td>
+      <td><code>active</code> / <code>activating</code></td>
+      <td>Open</td>
+      <td>TCP socket accepts connections and listener PID matches unit <code>MainPID</code> (or probe cannot inspect foreign PID).</td>
+    </tr>
+    <tr>
+      <td><code>error</code></td>
+      <td><code>unit</code></td>
+      <td><code>active</code> / <code>failed</code></td>
+      <td>Closed</td>
+      <td><code>start_timeout</code> (active &gt;10s but port still closed), <code>unit_failed</code> (crashed / non-143 exit), or <code>exec_failed</code>.</td>
+    </tr>
+    <tr>
+      <td><code>error</code></td>
+      <td><code>none</code></td>
+      <td><code>inactive</code> / absent</td>
+      <td>Open</td>
+      <td><code>port_in_use</code> — Local port held by a foreign process (Docker, local DB, unmanaged proxy) while unit is stopped.</td>
+    </tr>
+    <tr>
+      <td><code>error</code></td>
+      <td><code>none</code></td>
+      <td><code>active</code></td>
+      <td>Open (mismatch)</td>
+      <td><code>port_in_use</code> — Port held by a PID different from unit's <code>MainPID</code> (conflict with another process).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>4. Doctor Preflight Checks (Catalog Order)</h2>
+
+<p><code>cloud-sql-tracker doctor [--json]</code> evaluates host health in fixed sequence. Invariant: <code>ok === true</code> if and only if zero checks fail.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Order</th>
+      <th>Check ID</th>
+      <th>Severity</th>
+      <th>Target / Resource Probed</th>
+      <th>Pass Condition (Hard vs Warn)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>config</code></td>
+      <td>Hard (<code>fail</code>)</td>
+      <td><code>connections.json</code> (XDG or <code>--config</code>)</td>
+      <td>File exists, is readable, valid JSON, version 1, no unknown keys, unique IDs/ports/instances, no reserved ports.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>proxy_bin</code></td>
+      <td>Hard (<code>fail</code>)</td>
+      <td><code>cloud-sql-proxy</code> executable path</td>
+      <td>Resolves on <code>PATH</code> / config path, is executable, and running <code>&lt;path&gt; -v</code> exits 0 with <code>cloud-sql-proxy version &lt;token&gt;</code> within 2s.</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>systemd_user</code></td>
+      <td>Hard (<code>fail</code>)</td>
+      <td><code>org.freedesktop.systemd1</code> on user bus</td>
+      <td>D-Bus user session bus reachable at <code>$XDG_RUNTIME_DIR/bus</code>; systemd responds to manager version query.</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td><code>adc</code></td>
+      <td>Hard (<code>fail</code>)</td>
+      <td>Google Application Default Credentials</td>
+      <td><code>$GOOGLE_APPLICATION_CREDENTIALS</code> file exists, or default <code>~/.config/gcloud/application_default_credentials.json</code> exists.</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><code>journal_user</code></td>
+      <td>Hard (<code>fail</code>)</td>
+      <td>User systemd journal via <code>journalctl</code></td>
+      <td><code>journalctl</code> exists on <code>PATH</code> and <code>journalctl --user -n 0 --no-pager</code> executes with zero exit status.</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td><code>ports</code></td>
+      <td>Warn only</td>
+      <td>TCP listeners on all connection ports</td>
+      <td><code>pass</code> if all configured ports are closed or held by our unit; <code>warn</code> if any port is held by a foreign PID.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>5. Architecture &amp; Module Map</h2>
+
+<p>Strict acyclic dependency graph: <code>reconcile</code> depends only on <code>model</code>. Adapters isolate OS I/O behind clean value types.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Module Path</th>
+      <th>Type</th>
+      <th>Architectural Role</th>
+      <th>Key Public Functions / Types</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>src/main.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Thin binary entry point.</td>
+      <td><code>fn main() -&gt; !</code> (invokes <code>std::process::exit(cli::run())</code>).</td>
+    </tr>
+    <tr>
+      <td><code>src/cli.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Clap CLI parsing, stdout/stderr formatting, exit code mapping.</td>
+      <td><code>pub fn run() -&gt; i32</code>, <code>struct Cli</code>, <code>enum Commands</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/commands/select.rs</code></td>
+      <td><span class="tag tag-pure">Pure</span></td>
+      <td>Target selector expansion &amp; error filtering.</td>
+      <td><code>pub fn resolve_targets()</code>, <code>enum TargetSelector</code>, <code>struct TargetConnection</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/commands/status.rs</code></td>
+      <td><span class="tag tag-io">I/O + Pure</span></td>
+      <td>Assembles runtime observations into StatusDocument.</td>
+      <td><code>pub fn status()</code>, <code>fn assemble_document()</code>, <code>fn format_rfc3339()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/commands/mutate.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Start, stop, restart batch orchestration &amp; polling loops.</td>
+      <td><code>pub fn start()</code>, <code>pub fn stop()</code>, <code>pub fn restart()</code>, <code>struct BatchOutcome</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/commands/doctor.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Runs and aggregates the six preflight check rows.</td>
+      <td><code>pub fn doctor() -&gt; DoctorReport</code>, <code>fn ports_check()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/commands/logs.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Single connection unit resolution &amp; journal dump.</td>
+      <td><code>pub fn logs()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/reconcile.rs</code></td>
+      <td><span class="tag tag-pure">Pure</span></td>
+      <td>Pure decision engine; maps observations to HealthState.</td>
+      <td><code>pub fn reconcile() -&gt; StatusRowFields</code>, <code>const START_WINDOW: Duration</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/model.rs</code></td>
+      <td><span class="tag tag-pure">Pure</span></td>
+      <td>Domain types, DTO wire structs, unit name sanitization.</td>
+      <td><code>struct Connection</code>, <code>enum HealthState</code>, <code>enum Source</code>, <code>fn unit_name()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/config.rs</code></td>
+      <td><span class="tag tag-io">I/O + Pure</span></td>
+      <td>JSON parsing, defaults merging, strict validation.</td>
+      <td><code>pub fn parse()</code> (pure), <code>pub fn load()</code> (I/O), <code>struct Config</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/supervisor.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Systemd user manager D-Bus client via <code>zbus</code>.</td>
+      <td><code>pub fn start_transient()</code>, <code>pub fn stop()</code>, <code>pub fn show()</code>, <code>enum UnitSnapshot</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/port.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>TCP socket connect probe &amp; <code>procfs</code> PID attribution.</td>
+      <td><code>pub fn observe() -&gt; PortObservation</code>, <code>enum PortProbe</code> (<code>Open</code>/<code>Closed</code>/<code>Unreachable</code>).</td>
+    </tr>
+    <tr>
+      <td><code>src/env/mod.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td><code>PATH</code> binary discovery &amp; local ADC credential check.</td>
+      <td><code>pub fn resolve_proxy_bin()</code>, <code>pub fn proxy_bin_check()</code>, <code>pub fn adc_check()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>src/env/version_probe.rs</code></td>
+      <td><span class="tag tag-io">I/O + Pure</span></td>
+      <td>Spawns proxy with <code>-v</code>, bounds wait, parses version token.</td>
+      <td><code>pub fn probe_proxy_version()</code>, <code>fn parse_proxy_version_output()</code> (pure).</td>
+    </tr>
+    <tr>
+      <td><code>src/journal.rs</code></td>
+      <td><span class="tag tag-io">I/O</span></td>
+      <td>Spawns <code>journalctl</code> to dump logs and check user journal.</td>
+      <td><code>pub fn dump() -&gt; Result&lt;Dump, JournalError&gt;</code>, <code>pub fn journal_user_check()</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>6. Port Allocation &amp; Reservation Rules</h2>
+
+<p>Enforced strictly during <code>config::parse()</code>. Invalid port numbers cause immediate config rejection (Exit <code>2</code>).</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Port Range / Number</th>
+      <th>Category</th>
+      <th>Status</th>
+      <th>Reason &amp; Enforcement</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>1 – 1023</code></td>
+      <td>Privileged Ports</td>
+      <td><strong>Forbidden</strong></td>
+      <td>Requires <code>root</code> / <code>CAP_NET_BIND_SERVICE</code>. CLI runs strictly as an unprivileged user process.</td>
+    </tr>
+    <tr>
+      <td><code>5432</code></td>
+      <td>Standard PostgreSQL</td>
+      <td><strong>Forbidden</strong></td>
+      <td>Prevents collisions with local PostgreSQL instances or Docker Compose sidecars.</td>
+    </tr>
+    <tr>
+      <td><code>3306</code></td>
+      <td>Standard MySQL</td>
+      <td><strong>Forbidden</strong></td>
+      <td>Prevents collisions with local MySQL / MariaDB developer containers.</td>
+    </tr>
+    <tr>
+      <td><code>1433</code></td>
+      <td>Standard MS SQL Server</td>
+      <td><strong>Forbidden</strong></td>
+      <td>Prevents collisions with local SQL Server instances.</td>
+    </tr>
+    <tr>
+      <td><code>1024 – 65535</code> (excl. 1433/3306/5432)</td>
+      <td>Unprivileged Ports</td>
+      <td><strong>Allowed</strong></td>
+      <td>Valid connection bind target. Must be uniquely assigned across all connections in config.</td>
+    </tr>
+    <tr>
+      <td><code>15432 – 15438</code></td>
+      <td>Golden Config Range</td>
+      <td><strong>Standard</strong></td>
+      <td>Default range used in <code>examples/connections.json</code> across backend, frontend, and IoT groups.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>7. Key System &amp; Runtime Paths</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Path / Location</th>
+      <th>Associated Component</th>
+      <th>Persistence &amp; Lifetime</th>
+      <th>Description &amp; Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>~/.config/cloud-sql-tracker/connections.json</code></td>
+      <td><code>config</code> adapter</td>
+      <td>Permanent (User disk)</td>
+      <td>Default config file path (overridden by <code>$XDG_CONFIG_HOME</code> or <code>--config PATH</code>).</td>
+    </tr>
+    <tr>
+      <td><code>~/.config/gcloud/application_default_credentials.json</code></td>
+      <td><code>env::adc</code> check</td>
+      <td>Permanent (User disk)</td>
+      <td>Default ADC credentials file created by <code>gcloud auth application-default login</code>.</td>
+    </tr>
+    <tr>
+      <td><code>/run/user/&lt;UID&gt;/bus</code></td>
+      <td><code>supervisor</code> adapter</td>
+      <td>Login Session (tmpfs)</td>
+      <td>D-Bus user session socket used by <code>zbus</code> to control <code>systemd --user</code>.</td>
+    </tr>
+    <tr>
+      <td><code>/run/user/&lt;UID&gt;/systemd/transient/cloud-sql-proxy-&lt;ID&gt;.service</code></td>
+      <td><code>systemd --user</code></td>
+      <td>Volatile (Memory / tmpfs)</td>
+      <td>Dynamic transient unit definition. Automatically discarded at poweroff or logout.</td>
+    </tr>
+    <tr>
+      <td><code>/proc/net/tcp</code> &amp; <code>/proc/net/tcp6</code></td>
+      <td><code>port</code> adapter</td>
+      <td>Kernel runtime</td>
+      <td>Scanned by <code>procfs</code> to detect listening TCP socket inodes.</td>
+    </tr>
+    <tr>
+      <td><code>/proc/&lt;PID&gt;/fd/</code> &amp; <code>/proc/&lt;PID&gt;/comm</code></td>
+      <td><code>port</code> adapter</td>
+      <td>Kernel runtime</td>
+      <td>Inspected to match socket inodes with owning process PIDs and executable names.</td>
+    </tr>
+    <tr>
+      <td><code>~/.local/bin/cloud-sql-tracker</code></td>
+      <td>Developer install</td>
+      <td>Symlink / Binary</td>
+      <td>Standard user binary location created by <code>mise run install-local</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>8. Developer &amp; CI Commands (Mise)</h2>
+
+<p>Mise tasks provide thin, auditable wrappers around standard Cargo commands and repo validation scripts.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Mise Command</th>
+      <th>Underlying Execution</th>
+      <th>Purpose &amp; Scope</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>mise run check</code></td>
+      <td><code>fmt-check</code> + <code>lint</code> + <code>test</code> + <code>contracts</code></td>
+      <td>Full local gate matching GitHub Actions CI exactly. Run before every push.</td>
+    </tr>
+    <tr>
+      <td><code>mise run fmt</code></td>
+      <td><code>cargo fmt</code></td>
+      <td>Formats all Rust source files according to <code>rustfmt.toml</code>.</td>
+    </tr>
+    <tr>
+      <td><code>mise run fmt-check</code></td>
+      <td><code>cargo fmt --check</code></td>
+      <td>Non-mutating verification of Rust source formatting.</td>
+    </tr>
+    <tr>
+      <td><code>mise run lint</code></td>
+      <td><code>cargo clippy --all-targets --all-features -- -D warnings</code></td>
+      <td>Clippy linter execution with all warnings denied as errors.</td>
+    </tr>
+    <tr>
+      <td><code>mise run test</code></td>
+      <td><code>cargo test</code></td>
+      <td>Runs all 265+ unit and integration tests (never passes <code>--include-ignored</code>).</td>
+    </tr>
+    <tr>
+      <td><code>mise run contracts</code></td>
+      <td><code>scripts/validate-contracts.sh</code></td>
+      <td>Layer 1 contract verification: validates golden JSON files against JSON Schemas.</td>
+    </tr>
+    <tr>
+      <td><code>mise run build-release</code></td>
+      <td><code>cargo build --release --locked</code></td>
+      <td>Compiles optimized release binary with LTO, 1 codegen unit, and symbol stripping.</td>
+    </tr>
+    <tr>
+      <td><code>mise run install-local</code></td>
+      <td><code>build-release</code> + <code>ln -sfn ... ~/.local/bin/cloud-sql-tracker</code></td>
+      <td>Builds release binary and refreshes local symlink for PATH dogfooding.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>9. Release Cutting Checklist (Sequential)</h2>
+
+<p>Follow these steps in strict sequence to publish a new official GitHub Release and binary artifact:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Step</th>
+      <th>Action</th>
+      <th>Exact Command / File Target</th>
+      <th>Verification &amp; Invariant</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>Verify local gate</td>
+      <td><code>mise run check</code></td>
+      <td>All formatting, clippy, unit tests, and Layer 1 contract checks must pass with exit 0.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Bump version in manifest</td>
+      <td><code>Cargo.toml</code> &rarr; edit <code>version = "X.Y.Z"</code></td>
+      <td><code>Cargo.toml</code> is the single source of truth for version identity.</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Regenerate lockfile</td>
+      <td><code>cargo check</code> or <code>cargo build</code></td>
+      <td><strong>Mandatory in same commit:</strong> Updates <code>Cargo.lock</code> root package version to prevent <code>--locked</code> CI failure.</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Update docs &amp; goldens</td>
+      <td><code>README.md</code>, <code>examples/doctor.v1.json</code></td>
+      <td>Update golden examples and documentation version headers if semver changed.</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Commit release prep</td>
+      <td><code>git commit -am "release: bump package version to X.Y.Z"</code></td>
+      <td>Pre-commit and pre-push <code>hk</code> hooks run automated checks.</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Create annotated tag</td>
+      <td><code>git tag -a vX.Y.Z -m "vX.Y.Z"</code></td>
+      <td>Tag must be prefixed with <code>v</code> followed by exact <code>Cargo.toml</code> semver string.</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>Push branch and tag</td>
+      <td><code>git push origin main &amp;&amp; git push origin vX.Y.Z</code></td>
+      <td>Triggers <code>.github/workflows/release.yml</code> to build, package <code>.tar.gz</code>, compute <code>SHA256SUMS</code>, and publish GitHub Release.</td>
+    </tr>
+  </tbody>
+</table>
+
+<footer class="book-foot">
+  <p>Source: <a href="https://github.com/golgor/cloud-sql-tracker">github.com/golgor/cloud-sql-tracker</a> &middot; Reference documentation for <code>v0.1.1</code>.</p>
+  <p>Need more detail on any table or concept? Consult the full <a href="../index.html">cloud-sql-tracker textbook</a> or the <a href="glossary.html">Glossary</a>.</p>
+</footer>
+
+</body>
+</html>

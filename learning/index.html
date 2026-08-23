@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cloud-sql-tracker — a guided reading of the codebase</title>
+<link rel="stylesheet" href="assets/textbook.css">
+</head>
+<body>
+
+<header class="book-head">
+  <p class="kicker">A textbook for the curious reader</p>
+  <h1>cloud-sql-tracker</h1>
+  <p class="lede">A guided reading of a small, real Rust codebase: what it does,
+  how it does it, and — mostly — <em>why</em> it is built this way. Twelve short
+  chapters, big picture first, detail last.</p>
+</header>
+
+<h2>What this book assumes</h2>
+
+<p>You can read Rust: ownership, <code>Result</code>, <code>enum</code>,
+<code>match</code>, traits. That is enough.</p>
+
+<p>You are assumed to know <strong>nothing</strong> about this project, Google
+Cloud SQL, systemd, D-Bus, or Application Default Credentials. Each of those is
+explained once, in one sentence, the first time it appears. Terms you will meet
+repeatedly live in the <a href="reference/glossary.html">glossary</a>.</p>
+
+<div class="note">
+  <span class="label">The subject in one paragraph</span>
+  <p><strong>cloud-sql-tracker</strong> is a stateless command-line control
+  plane. It starts, stops, and reports on several of Google's
+  <code>cloud-sql-proxy</code> processes at once — each on a fixed local port —
+  and publishes machine-readable status for scripts and a desktop bar widget. It
+  does not implement the database tunnel itself. Google's binary does that; this
+  tool is the thing that remembers <em>which</em> proxies you wanted, on
+  <em>which</em> ports, and tells you honestly whether they are up.</p>
+</div>
+
+<h2>How to read it</h2>
+
+<p>In order, the first time. The book is arranged as a funnel: Part I is
+orientation you cannot skip without the rest feeling arbitrary, and Part II
+contains the one algorithm at the heart of the program. Parts III–V can be
+dipped into later as reference.</p>
+
+<p>Each chapter ends with three <strong>recall</strong> questions. Answering
+them from memory, before opening the answer, is what turns reading into
+knowing — recognising a fact you have just read is a poor test of whether you
+own it.</p>
+
+<h2>Contents</h2>
+
+<p class="part">Part I · Orientation</p>
+<ol class="toc">
+  <li>
+    <div>
+      <a href="chapters/01-the-problem.html">The problem</a>
+      <p class="blurb">Seven databases, one default port, and no way to see what is
+    running. Why this tool exists at all, and what it refuses to do.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/02-the-language.html">The language</a>
+      <p class="blurb">Connection, Proxy process, Unit, Health state, Source. The
+    vocabulary is the design — and these words are the Rust type names.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/03-the-shape.html">The shape</a>
+      <p class="blurb">A short-lived CLI, systemd as the process owner, and four
+    hard decisions recorded as ADRs. Why there is no daemon.</p>
+    </div>
+  </li>
+</ol>
+
+<p class="part">Part II · The core</p>
+<ol class="toc" start="4">
+  <li>
+    <div>
+      <a href="chapters/04-contracts-first.html">Contracts first</a>
+      <p class="blurb">Prose, JSON Schema, and a golden example — changed together
+    or not at all. The method that shaped every module.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/05-model-and-config.html">The model and the config</a>
+      <p class="blurb">The types, and the validation that makes a bad config file a
+    hard error instead of a mystery at runtime.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/06-reconcile.html">Reconcile: the pure heart</a>
+      <p class="blurb">One observation in, one Health state out. No I/O, no clock,
+    no excuses — and therefore exhaustively testable. The best chapter.</p>
+    </div>
+  </li>
+</ol>
+
+<p class="part">Part III · The edges</p>
+<ol class="toc" start="7">
+  <li>
+    <div>
+      <a href="chapters/07-supervisor.html">Talking to systemd</a>
+      <p class="blurb">D-Bus without the mystique: transient units, typed
+    properties, and why we never shell out to <code>systemctl</code>.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/08-smaller-adapters.html">Three smaller adapters</a>
+      <p class="blurb">Probing a port, finding a binary and credentials, reading
+    the journal. Small files, sharp lessons.</p>
+    </div>
+  </li>
+</ol>
+
+<p class="part">Part IV · The layers above</p>
+<ol class="toc" start="9">
+  <li>
+    <div>
+      <a href="chapters/09-commands.html">The commands seam</a>
+      <p class="blurb">Everything the tool can do, with no argv parsing and no
+    printing. Batches, idempotence, and two clocks that must not be merged.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/10-cli.html">The thin shell</a>
+      <p class="blurb">clap in exactly one module, five exit codes, and a
+    hand-rolled <code>--version</code> flag with a good excuse.</p>
+    </div>
+  </li>
+</ol>
+
+<p class="part">Part V · Proof and operations</p>
+<ol class="toc" start="11">
+  <li>
+    <div>
+      <a href="chapters/11-proving-it-works.html">Proving it works</a>
+      <p class="blurb">Pure-seam unit tests, schema contracts, a real spawned
+    binary, and the human gate no test can replace.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="chapters/12-shipping-it.html">Shipping it</a>
+      <p class="blurb">One toolchain number in three files, a measured release
+    profile, and what actually happens to your proxies at shutdown.</p>
+    </div>
+  </li>
+</ol>
+
+<h2>Reference</h2>
+
+<p>Written to be printed and kept beside you, not read once.</p>
+
+<ol class="toc">
+  <li>
+    <div>
+      <a href="reference/glossary.html">Glossary</a>
+      <p class="blurb">Every domain and infrastructure term, defined once, with
+    where it appears in the repo.</p>
+    </div>
+  </li>
+  <li>
+    <div>
+      <a href="reference/cheatsheet.html">Cheat sheet</a>
+      <p class="blurb">Subcommands, exit codes, Health states, the module map, key
+    paths, and the release steps in order.</p>
+    </div>
+  </li>
+</ol>
+
+<h2>A note on trust</h2>
+
+<p>Every code snippet in this book is copied verbatim from the repository and
+carries the file and line it came from. Where a chapter explains a design
+decision, it cites the frozen contract in <code>docs/</code> or the ADR that
+settled it, because in this project those documents — not anyone's memory — are
+the authority.</p>
+
+<p>If a snippet and the repository ever disagree, the repository is right and
+this book has drifted. That is a bug worth reporting.</p>
+
+<footer class="book-foot">
+  <p>Source: <a href="https://github.com/golgor/cloud-sql-tracker">github.com/golgor/cloud-sql-tracker</a>
+  &middot; describes <code>v0.1.1</code>, 8,389 lines of Rust across 17 files.</p>
+  <p>This book has a teacher attached. Anything unclear, anything that smells
+  hand-wavy, anything you want to go deeper on — just ask.</p>
+</footer>
+
+</body>
+</html>

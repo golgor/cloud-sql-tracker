@@ -289,10 +289,7 @@ mod tests {
             by_id(&config, "backend-dev").expect("backend-dev is in the golden config");
         assert_eq!(backend_dev.name, "Backend Dev");
         assert_eq!(backend_dev.group, "backend");
-        assert_eq!(
-            backend_dev.instance,
-            "toolsense-dev:europe-west1:backend-postgres-1"
-        );
+        assert_eq!(backend_dev.instance, "acme-dev:europe-west1:backend-db-1");
         assert_eq!(backend_dev.port, 15432);
         assert_eq!(backend_dev.address, "127.0.0.1");
         assert!(!backend_dev.private_ip);

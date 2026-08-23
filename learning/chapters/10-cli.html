@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10. The thin shell — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part IV &rsaquo; Chapter 10</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 10 &middot; Part IV</p>
+  <h1>The thin shell</h1>
+  <p class="lede">Explore the outermost CLI presentation layer: how cloud-sql-tracker parses arguments with clap in exactly one module, maps batch execution outcomes to a strict exit-code contract, and formats human text versus machine JSON.</p>
+</header>
+
+<p>In <a href="09-commands.html">Chapter 09</a>, we explored the <code>commands</code> seam: the typed engine that drives all application behavior without parsing arguments or printing to the screen. Now we reach the edge of the binary: <code>src/cli.rs</code> and <code>src/main.rs</code>.</p>
+
+<p><code>cli.rs</code> is the <strong>only module in the entire crate</strong> permitted to:</p>
+
+<ol>
+  <li>Import and derive types from the <code>clap</code> library.</li>
+  <li>Read process arguments via <code>std::env::args()</code>.</li>
+  <li>Print formatted human text or JSON to <code>stdout</code> and <code>stderr</code>.</li>
+  <li>Determine the operating system process exit code (<code>0</code>, <code>1</code>, <code>2</code>, <code>3</code>, or <code>4</code>).</li>
+</ol>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│                        main.rs                         │
+│             std::process::exit(cli::run())             │
+└───────────────────────────┬────────────────────────────┘
+                            │ (no argv parameter!)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                         cli.rs                         │
+│  - clap parsing (Cli, SelectorArgs, Commands)          │
+│  - resolve_selector() (pure exclusivity & defaults)    │
+│  - exit_for_batch() (outcome -> exit code 0..4)        │
+│  - format status / doctor / logs / errors              │
+└───────────────────────────┬────────────────────────────┘
+                            │ typed structs (Selector, wait_ms)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                     commands seam                      │
+└────────────────────────────────────────────────────────┘</div>
+
+<h2>1. A thirteen-line <code>main.rs</code></h2>
+
+<p>Because all argument parsing, execution routing, and exit code selection live in <code>cli.rs</code>, the binary's entry point is stripped of all logic:</p>
+
+<pre><code>fn main() {
+    std::process::exit(cloud_sql_tracker::cli::run());
+}</code></pre>
+<p class="src">src/main.rs:11–13</p>
+
+<div class="why">
+  <span class="label">Why cli::run() Takes No Arguments</span>
+  <p>Notice that <code>cli::run()</code> takes no arguments. It reads <code>std::env::args()</code> directly inside the function. Integration tests in <code>tests/cli_smoke.rs</code> and <code>tests/cli_json_contracts.rs</code> do not test by calling library functions with mock strings; they spawn the real compiled binary on disk using <code>std::process::Command</code>. Keeping <code>main.rs</code> trivial ensures that binary test runs execute identical code to production invocations.</p>
+</div>
+
+<h2>2. The bare version flag challenge</h2>
+
+<p>Per <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/cli-contract.v1.md"><code>docs/cli-contract.v1.md</code></a>, running <code>cloud-sql-tracker --version</code> or <code>-V</code> must print a <strong>bare semantic version string</strong> (e.g. <code>0.1.1</code>), with no binary name prefix, no <code>v</code> prefix, and no trailing whitespace.</p>
+
+<p>However, <code>clap</code>'s built-in <code>#[command(version)]</code> handler unconditionally formats output as <code>"{bin_name} {version}"</code> (e.g. <code>cloud-sql-tracker 0.1.1</code>). In <code>clap_builder</code> 4.6, there is no template hook to suppress the binary name.</p>
+
+<p>cloud-sql-tracker solves this by disabling <code>clap</code>'s built-in version flag and declaring a manual boolean flag:</p>
+
+<pre><code>#[derive(Debug, Parser)]
+#[command(name = "cloud-sql-tracker", disable_version_flag = true)]
+struct Cli {
+    /// Config file override. Default: $XDG_CONFIG_HOME/cloud-sql-tracker/connections.json
+    #[arg(long = "config", value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Print the bare version and exit.
+    #[arg(short = 'V', long = "version")]
+    version: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}</code></pre>
+<p class="src">src/cli.rs:55–71</p>
+
+<p>When <code>cli.version</code> is true, <code>run()</code> immediately outputs the compile-time crate version and exits 0:</p>
+
+<pre><code>pub fn run() -> i32 {
+    let cli = Cli::parse();
+
+    if cli.version {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
+    // ...
+}</code></pre>
+<p class="src">src/cli.rs:146–154</p>
+
+<h2>3. Selector resolution and exclusivity (<code>resolve_selector</code>)</h2>
+
+<p>Subcommands like <code>start</code>, <code>stop</code>, and <code>status</code> accept target selectors: an ID positional argument, <code>--group &lt;NAME&gt;</code>, or <code>--all</code>. Rather than relying on <code>clap</code>'s <code>ArgGroup</code> attribute (which hides validation inside macro-generated code), <code>cli.rs</code> validates selectors using a pure function:</p>
+
+<pre><code>fn resolve_selector(
+    args: SelectorArgs,
+    require_target: bool,
+) -> Result<commands::Selector, UsageError> {
+    let provided = [args.id.is_some(), args.group.is_some(), args.all]
+        .into_iter()
+        .filter(|set| *set)
+        .count();
+    if provided > 1 {
+        return Err(UsageError(
+            "id, --group, and --all cannot combine (docs/cli-contract.v1.md, \
+             \"Target selectors\": \"Mutual exclusion\")"
+                .to_string(),
+        ));
+    }
+
+    if let Some(id) = args.id {
+        return Ok(commands::Selector::Id(id));
+    }
+    if let Some(group) = args.group {
+        return Ok(commands::Selector::Group(group));
+    }
+    if args.all {
+        return Ok(commands::Selector::All);
+    }
+
+    if require_target {
+        return Err(UsageError(
+            "an explicit target is required: ID, --group NAME, or --all \
+             (docs/cli-contract.v1.md, \"Target selectors\": \"Defaults\")"
+                .to_string(),
+        ));
+    }
+    Ok(commands::Selector::All)
+}</code></pre>
+<p class="src">src/cli.rs:196–233</p>
+
+<div class="pure">
+  <span class="label">Pure Logic</span>
+  <p>This design provides two major benefits:
+  <ol>
+    <li><strong>Fast unit testing:</strong> Unit tests in <code>src/cli.rs</code> test mutual exclusion and default fallback directly across 8 separate test cases without spawning subprocesses or parsing fake CLI argv strings.</li>
+    <li><strong>Subcommand-specific defaults:</strong> For <code>status</code>, an omitted selector defaults to <code>Selector::All</code> (<code>require_target: false</code>). For mutating commands (<code>start</code>, <code>stop</code>, <code>restart</code>), an omitted selector is rejected with exit code 2 (<code>require_target: true</code>).</li>
+  </ol>
+  </p>
+</div>
+
+<h2>4. The exit code contract (0–4)</h2>
+
+<p>Command-line automation and desktop UI widgets depend on deterministic, machine-interpretable process exit codes. The exit code contract is frozen in <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/cli-contract.v1.md"><code>docs/cli-contract.v1.md</code></a>:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Meaning</th>
+      <th>Example Scenarios</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>0</code></td>
+      <td>Success</td>
+      <td>All requested operations succeeded or were idempotent no-ops; <code>status</code> produced a document; <code>restart --failed</code> with no failed units; <code>logs</code> succeeded (even if journal was empty).</td>
+      <td><code>start --all</code> (7/7 ok)<br><code>status --json</code> (even with error rows)<br><code>logs fe-dev</code></td>
+    </tr>
+    <tr>
+      <td><code>1</code></td>
+      <td>Partial Failure</td>
+      <td>Multi-target batch where at least one target succeeded and at least one failed. <strong>Survivors remain running.</strong> Never used by single-id commands or <code>logs</code>.</td>
+      <td><code>start --all</code> (6 started ok, 1 port conflict)</td>
+    </tr>
+    <tr>
+      <td><code>2</code></td>
+      <td>Usage / Config</td>
+      <td>Invalid CLI arguments, syntax errors, missing/unreadable config file, unknown connection ID or group name, target mutual exclusion violation, single-id start on disabled connection.</td>
+      <td><code>start nope</code><br><code>start fe-dev --all</code><br><code>logs --lines 0</code></td>
+    </tr>
+    <tr>
+      <td><code>3</code></td>
+      <td>Dependency</td>
+      <td>Environmental prerequisite failure: systemd user D-Bus unreachable, <code>proxy_bin</code> binary not found on <code>PATH</code>, <code>journalctl</code> binary missing, or any doctor preflight check failed.</td>
+      <td><code>start --all</code> (no systemd session)<br><code>doctor</code> (ADC missing)<br><code>logs</code> (no journalctl)</td>
+    </tr>
+    <tr>
+      <td><code>4</code></td>
+      <td>Total Failure</td>
+      <td>Every attempted target in a batch failed, or a single-id mutating command failed after attempting the operation. Never used by <code>logs</code>.</td>
+      <td><code>start --all</code> (0/7 ok)<br><code>start fe-dev</code> (crashed or port in use)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Mapping batches to exit codes (<code>exit_for_batch</code>)</h3>
+
+<p>When a mutating command finishes, <code>commands::mutate</code> returns a <code>BatchOutcome</code> containing individual <code>TargetResult</code> values. <code>cli.rs</code> turns this outcome into a single process exit code:</p>
+
+<pre><code>fn exit_for_batch(outcome: &BatchOutcome) -> i32 {
+    let refused_disabled = outcome
+        .targets
+        .iter()
+        .any(|target| target.result == TargetResult::RefusedDisabled);
+    if refused_disabled {
+        return 2;
+    }
+
+    if outcome.dependency_count() > 0 {
+        return 3;
+    }
+
+    if outcome.failed_count() == 0 {
+        return 0;
+    }
+
+    if outcome.succeeded_count() > 0 {
+        1
+    } else {
+        4
+    }
+}</code></pre>
+<p class="src">src/cli.rs:384–408</p>
+
+<div class="note">
+  <span class="label">Precedence Rules</span>
+  <p>Notice the exact priority order in <code>exit_for_batch</code>:</p>
+  <ol>
+    <li><strong>Refused disabled target:</strong> If a single-target command targeted a disabled connection, exit <code>2</code> (usage error).</li>
+    <li><strong>Dependency failure takes precedence:</strong> If any target encountered a systemic dependency failure (like D-Bus bus down), exit <code>3</code> wins immediately—even if other connections in the batch had already started!</li>
+    <li><strong>Clean successes:</strong> If zero targets failed, exit <code>0</code>.</li>
+    <li><strong>Partial vs total failure:</strong> If at least one target succeeded, exit <code>1</code>; if zero targets succeeded, exit <code>4</code>.</li>
+  </ol>
+</div>
+
+<h2>5. Human text vs machine JSON formatting</h2>
+
+<p>The CLI is designed to serve both humans in interactive terminals and automated UI plugins like the Omarchy bar widget.</p>
+
+<h3>Presentation labels decoupled from domain models</h3>
+<p>In Rust, it is tempting to implement <code>std::fmt::Display</code> directly on domain enums like <code>HealthState</code> or <code>ErrorCode</code>. However, cloud-sql-tracker keeps domain models in <code>src/model.rs</code> completely free of presentation logic. Human-readable label functions live exclusively inside <code>src/cli.rs</code>:</p>
+
+<pre><code>fn state_label(state: HealthState) -> &'static str {
+    match state {
+        HealthState::Stopped => "stopped",
+        HealthState::Starting => "starting",
+        HealthState::Running => "running",
+        HealthState::Error => "error",
+    }
+}
+
+fn error_code_label(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::BinMissing => "bin_missing",
+        ErrorCode::PortInUse => "port_in_use",
+        ErrorCode::ExecFailed => "exec_failed",
+        ErrorCode::UnitFailed => "unit_failed",
+        ErrorCode::StartTimeout => "start_timeout",
+        ErrorCode::Auth => "auth",
+        ErrorCode::Config => "config",
+        ErrorCode::Unknown => "unknown",
+    }
+}</code></pre>
+<p class="src">src/cli.rs:531–558</p>
+
+<p>Unit tests explicitly verify that these presentation labels match the wire serialization catalog defined in the JSON Schema:</p>
+
+<pre><code>#[test]
+fn error_code_label_matches_the_status_document_wire_catalog() {
+    assert_eq!(error_code_label(ErrorCode::PortInUse), "port_in_use");
+    assert_eq!(error_code_label(ErrorCode::StartTimeout), "start_timeout");
+    assert_eq!(error_code_label(ErrorCode::UnitFailed), "unit_failed");
+    assert_eq!(error_code_label(ErrorCode::ExecFailed), "exec_failed");
+    assert_eq!(error_code_label(ErrorCode::BinMissing), "bin_missing");
+    assert_eq!(error_code_label(ErrorCode::Auth), "auth");
+    assert_eq!(error_code_label(ErrorCode::Config), "config");
+    assert_eq!(error_code_label(ErrorCode::Unknown), "unknown");
+}</code></pre>
+<p class="src">src/cli.rs:704–716</p>
+
+<h3>Doctor formatting</h3>
+<p>When running <code>doctor</code> in human mode, each check outputs a bracketed status tag (<code>[PASS]</code>, <code>[WARN]</code>, <code>[FAIL]</code>) followed by the check identifier, details, and optional recovery hints:</p>
+
+<pre><code>fn print_doctor(report: &DoctorReport, json: bool) {
+    if json {
+        let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+        println!("{text}");
+        return;
+    }
+
+    for check in &report.checks {
+        let status = match check.status {
+            CheckStatus::Pass => "PASS",
+            CheckStatus::Warn => "WARN",
+            CheckStatus::Fail => "FAIL",
+        };
+        match &check.hint {
+            Some(hint) => println!("[{status}] {}: {} (hint: {hint})", check.id, check.detail),
+            None => println!("[{status}] {}: {}", check.id, check.detail),
+        }
+    }
+    println!("{}", if report.ok { "ok" } else { "FAILED" });
+}</code></pre>
+<p class="src">src/cli.rs:480–498</p>
+
+<p>When <code>--json</code> is passed, <code>print_doctor</code> bypasses text formatting entirely and streams the pretty-printed JSON schema document directly to <code>stdout</code>.</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>exit_for_batch</code> return exit code 3 (Dependency) if any target encounters a dependency failure, even if several other connections started successfully?
+      <details><summary>Answer</summary><p>A dependency failure indicates a systemic infrastructure breakdown (such as D-Bus user session loss or missing proxy binaries) rather than an individual database issue. Per the CLI contract, environmental failures take priority so automated scripts can distinguish host configuration errors from routine database failures.</p></details>
+    </li>
+    <li>Why does <code>cloud-sql-tracker</code> disable clap's built-in <code>#[command(version)]</code> and handle <code>-V</code>/<code>--version</code> manually?
+      <details><summary>Answer</summary><p>The CLI contract requires <code>--version</code> to output a bare semantic version string (such as <code>0.1.1</code>) without a binary name or prefix. Clap's built-in version flag always prints <code>"cloud-sql-tracker 0.1.1"</code>, and <code>clap_builder</code> provides no template option to remove the binary name.</p></details>
+    </li>
+    <li>Why are presentation labels like <code>state_label</code> and <code>error_code_label</code> defined in <code>src/cli.rs</code> rather than implementing <code>Display</code> on types in <code>src/model.rs</code>?
+      <details><summary>Answer</summary><p><code>model.rs</code> defines the pure domain vocabulary and serialization structures shared across the entire crate. Text formatting for terminal output is an outermost presentation concern belonging strictly to the CLI shell, keeping domain models clean and free of UI logic.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/cli-contract.v1.md">docs/cli-contract.v1.md</a> — The normative CLI contract defining arguments, subcommands, selectors, and exit codes 0 through 4.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="09-commands.html">&larr; 09. The commands seam</a>
+  <a href="../index.html">Contents</a>
+  <a href="11-proving-it-works.html">11. Proving it works &rarr;</a>
+</nav>
+
+</body>
+</html>

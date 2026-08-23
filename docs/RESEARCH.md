@@ -218,16 +218,16 @@ cloud-sql-tracker doctor [--json]         # bin, ADC hint, port conflicts, unit 
   },
   "connections": [
     {
-      "id": "toolsense-2",
-      "name": "Toolsense 2",
+      "id": "fe-dev",
+      "name": "FE Dev",
       "group": "backend",
-      "instance": "toolsense-dev:europe-west1:toolsense-2",
+      "instance": "acme-dev:europe-west1:frontend-db-1",
       "address": "127.0.0.1",
       "port": 55432,
       "private_ip": false,
       "state": "running",
       "pid": 12345,
-      "unit": "cloud-sql-proxy-toolsense-2.service",
+      "unit": "cloud-sql-proxy-fe-dev.service",
       "uptime_sec": 3600,
       "error": null
     }
@@ -281,10 +281,10 @@ No long-lived tracker daemon. systemd owns lifetime; CLI is a pure control plane
   "proxy_bin": "cloud-sql-proxy",
   "connections": [
     {
-      "id": "toolsense-2",
-      "name": "Toolsense 2",
+      "id": "fe-dev",
+      "name": "FE Dev",
       "group": "backend",
-      "instance": "toolsense-dev:europe-west1:toolsense-2",
+      "instance": "acme-dev:europe-west1:frontend-db-1",
       "port": 55432,
       "address": "127.0.0.1",
       "private_ip": false,

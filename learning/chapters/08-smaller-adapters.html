@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>08. Three smaller adapters — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part III &rsaquo; Chapter 08</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 08 &middot; Part III</p>
+  <h1>Three smaller adapters</h1>
+  <p class="lede">Discover how cloud-sql-tracker interacts with the host OS without heavyweight frameworks: probing ports with procfs, discovering binaries and credentials, running bounded subprocesses, and streaming systemd journals.</p>
+</header>
+
+<p>In <a href="07-supervisor.html">Chapter 07</a>, we saw how the supervisor adapter speaks D-Bus directly to <code>systemd --user</code>. But a full control plane requires three additional interactions with the Linux environment:</p>
+
+<ol>
+  <li><strong>Port observation:</strong> Checking if a local TCP port is open and discovering which process owns it (<a href="../reference/glossary.html#procfs"><code>procfs</code></a>).</li>
+  <li><strong>Environment discovery:</strong> Finding the <code>cloud-sql-proxy</code> executable on <code>PATH</code> and validating <a href="../reference/glossary.html#adc">Application Default Credentials</a>.</li>
+  <li><strong>Bounded subprocess execution &amp; journal streaming:</strong> Probing proxy version identity without hanging, and reading structured logs from <code>journalctl</code>.</li>
+</ol>
+
+<div class="why">
+  <span class="label">Why</span>
+  <p>Per <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0004-rust-toolchain-and-linux-io.md">ADR 0004</a>, cloud-sql-tracker prefers direct, native Linux interfaces over scraping shell pipelines like <code>ss</code> or <code>pgrep</code>. Small, dedicated adapters isolate operating system I/O behind narrow boundaries, ensuring that higher-level decision logic remains pure and deterministic.</p>
+</div>
+
+<h2>1. Port observation and listener attribution (<code>src/port.rs</code>)</h2>
+
+<p>When <a href="../reference/glossary.html#reconcile">Reconcile</a> evaluates a <a href="../reference/glossary.html#connection">Connection</a>, it needs to know whether the configured local TCP port (e.g. <code>127.0.0.1:15432</code>) is open. But a simple boolean <em>"is the port open?"</em> is dangerously incomplete. If port <code>15432</code> is open, who is holding it? Is it our managed <a href="../reference/glossary.html#unit">Unit</a>'s PID, or is it an unmanaged <a href="../reference/glossary.html#foreign-process">Foreign process</a> like Docker or a manual proxy?</p>
+
+<p>The <code>port</code> module answers both questions via a single public entry point: <code>observe()</code>.</p>
+
+<pre><code>pub(crate) fn observe(address: IpAddr, port: u16) -> PortObservation {
+    let probe = probe_tcp(address, port);
+    let (listener_pid, listener_name) = attribute_listener(address, port);
+    PortObservation {
+        probe,
+        listener_pid,
+        listener_name,
+    }
+}</code></pre>
+<p class="src">src/port.rs:34–42</p>
+
+<h3>The authoritative TCP liveness probe</h3>
+
+<p>Liveness is verified by attempting a real TCP connection with a strict 200 millisecond timeout:</p>
+
+<pre><code>const CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+
+fn probe_tcp(address: IpAddr, port: u16) -> PortProbe {
+    match TcpStream::connect_timeout(&SocketAddr::new(address, port), CONNECT_TIMEOUT) {
+        Ok(_stream) => PortProbe::Open,
+        Err(err) => classify_connect_error(&err),
+    }
+}
+
+fn classify_connect_error(err: &io::Error) -> PortProbe {
+    if err.kind() == io::ErrorKind::ConnectionRefused {
+        PortProbe::Closed
+    } else {
+        PortProbe::Unreachable
+    }
+}</code></pre>
+<p class="src">src/port.rs:24–62</p>
+
+<div class="pure">
+  <span class="label">Pure Logic</span>
+  <p>Notice the three-way classification of <code>PortProbe</code>: <code>Open</code> (connect succeeded), <code>Closed</code> (explicit <code>ECONNREFUSED</code> from the kernel), or <code>Unreachable</code> (timeout, network unreachable, or firewall filter). If a connect times out, treating it as "closed" would be a false negative. Classifying it as <code>Unreachable</code> alerts doctor to investigate connectivity issues.</p>
+</div>
+
+<h3>Listener attribution via procfs</h3>
+
+<p>If the port is listening, <code>attribute_listener</code> inspects Linux's <code>/proc</code> filesystem to discover the PID and process name. It executes a 4-step pipeline:</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│ 1. Scan /proc/net/tcp & /proc/net/tcp6 for LISTEN entries│
+└───────────────────────────┬────────────────────────────┘
+                            │ binds_to(local, addr, port)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ 2. Find socket inode matching address:port            │
+└───────────────────────────┬────────────────────────────┘
+                            │ scan /proc/&lt;pid&gt;/fd/*
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ 3. Attribute inode to a unique owning Process PID      │
+└───────────────────────────┬────────────────────────────┘
+                            │ read /proc/&lt;pid&gt;/comm
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ 4. Extract process command name (e.g. "cloud-sql-proxy")│
+└────────────────────────────────────────────────────────┘</div>
+
+<p>First, matching socket table entries must handle wildcard bindings correctly:</p>
+
+<pre><code>fn binds_to(local: SocketAddr, address: IpAddr, port: u16) -> bool {
+    local.port() == port && (local.ip() == address || local.ip().is_unspecified())
+}</code></pre>
+<p class="src">src/port.rs:108–110</p>
+
+<p>An entry listening on <code>0.0.0.0</code> or <code>::</code> (<code>is_unspecified()</code>) binds to all network interfaces on the host, which means it occupies the Connection's specific loopback IP (<code>127.0.0.1</code>).</p>
+
+<p>Next, the adapter scans process file descriptors to find which process owns the socket inode:</p>
+
+<pre><code>fn pid_holding_inode(inode: u64) -> Option<u32> {
+    let holders = all_processes_best_effort().filter_map(|process| {
+        let holds_inode = process
+            .fd()
+            .ok()?
+            .filter_map(Result::ok)
+            .any(|fd| matches!(fd.target, FDTarget::Socket(fd_inode) if fd_inode == inode));
+        holds_inode.then(|| process.pid() as u32)
+    });
+    unique(holders)
+}</code></pre>
+<p class="src">src/port.rs:117–126</p>
+
+<div class="note">
+  <span class="label">Defensive Attribution</span>
+  <p>Attribution is strictly best-effort and unambiguous. The <code>unique()</code> helper ensures that if zero processes or more than one process references the socket inode (such as during rapid process fork/exec cycles), it returns <code>None</code> rather than guessing. Furthermore, the process name is read directly from <code>/proc/&lt;pid&gt;/comm</code> rather than <code>/proc/&lt;pid&gt;/stat</code>, avoiding fragile string-parsing bugs when process names contain parentheses or spaces.</p>
+</div>
+
+<h2>2. Binary and credentials discovery (<code>src/env/mod.rs</code>)</h2>
+
+<p>The <code>env</code> module acts as the single authority for finding the proxy executable on disk and verifying Google Cloud credentials.</p>
+
+<h3>Executable resolution: <code>NotFound</code> vs <code>NotExecutable</code></h3>
+
+<p>When starting a proxy or running diagnostic preflights, the control plane needs to locate the binary specified in configuration (or default to <code>cloud-sql-proxy</code>):</p>
+
+<pre><code>pub(crate) fn resolve_proxy_bin(configured: Option<&str>) -> Result<PathBuf, ProxyBinError> {
+    let name = configured.unwrap_or(DEFAULT_PROXY_BIN);
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    resolve_bin(name, &path_env)
+}
+
+fn resolve_bin(name: &str, path_env: &OsStr) -> Result<PathBuf, ProxyBinError> {
+    let candidate = Path::new(name);
+    if candidate.is_absolute() {
+        return require_executable_file(candidate).map(|()| candidate.to_path_buf());
+    }
+
+    let mut non_executable_match = None;
+    for dir in std::env::split_paths(path_env) {
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Ok(candidate);
+        }
+        if non_executable_match.is_none() && candidate.is_file() {
+            non_executable_match = Some(candidate);
+        }
+    }
+
+    match non_executable_match {
+        Some(path) => Err(ProxyBinError::NotExecutable { path }),
+        None => Err(ProxyBinError::NotFound {
+            name: name.to_string(),
+        }),
+    }
+}</code></pre>
+<p class="src">src/env/mod.rs:37–138</p>
+
+<div class="note">
+  <span class="label">Sharp Error Distinction</span>
+  <p>Notice the distinction between <code>ProxyBinError::NotFound</code> and <code>ProxyBinError::NotExecutable</code>. If a file named <code>cloud-sql-proxy</code> exists in a <code>PATH</code> directory but lacks the executable bit (<code>0o111</code> permissions), reporting "not found" would confuse the operator. The resolver explicitly flags <code>NotExecutable</code> so the diagnostic hint instructs the user to check file permissions.</p>
+</div>
+
+<h3>Local ADC verification</h3>
+
+<p>Per <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0002-adc-only-auth.md">ADR 0002</a>, Google Application Default Credentials (ADC) are mandatory. The <code>env</code> module checks for credentials using a 2-tier priority rule:</p>
+
+<ol>
+  <li><strong>Priority 1:</strong> If <code>GOOGLE_APPLICATION_CREDENTIALS</code> is set in the environment, that specific file path must exist and be readable.</li>
+  <li><strong>Priority 2:</strong> Otherwise, check the standard user location at <code>~/.config/gcloud/application_default_credentials.json</code>.</li>
+</ol>
+
+<pre><code>fn resolve_adc_status(home: Option<&Path>, gac_env: Option<&Path>) -> AdcStatus {
+    if let Some(path) = gac_env {
+        return AdcStatus {
+            present: is_readable_file(path),
+            path: Some(path.to_path_buf()),
+            gac_env_set: true,
+        };
+    }
+
+    let default_path = home.map(|home| home.join(ADC_RELATIVE_PATH));
+    AdcStatus {
+        present: default_path.as_deref().is_some_and(is_readable_file),
+        path: default_path,
+        gac_env_set: false,
+    }
+}</code></pre>
+<p class="src">src/env/mod.rs:239–253</p>
+
+<div class="pure">
+  <span class="label">Local Inspection Only</span>
+  <p><code>resolve_adc_status</code> is entirely local. It checks file readability (<code>is_readable_file</code>) but never spawns <code>gcloud</code>, connects to Google servers, or verifies OAuth token validity. This guarantees that <code>doctor</code> runs in milliseconds and never hangs on network latency.</p>
+</div>
+
+<h2>3. Subprocess execution &amp; version probing (<code>src/env/version_probe.rs</code>)</h2>
+
+<p>When <code>cloud-sql-tracker doctor</code> validates the proxy binary, simply checking that an executable exists on <code>PATH</code> is insufficient—an operator might have placed an unrelated binary or broken wrapper script at that path. Doctor therefore executes <code>cloud-sql-proxy -v</code> to verify identity and capture the version string (e.g. <code>2.25.2+linux.amd64</code>).</p>
+
+<div class="trap">
+  <span class="label">Critical Architectural Rule</span>
+  <p><strong><code>start</code> deliberately does NOT probe proxy versions.</strong> When starting connections, <code>start</code> only calls <code>resolve_proxy_bin</code> to obtain the path. Probing <code>-v</code> on every startup would add latency and redundant subprocess spawns. The version probe belongs exclusively to <code>doctor</code>.</p>
+</div>
+
+<h3>The timeout problem in Rust's standard library</h3>
+
+<p>Rust's standard library provides <code>Child::wait()</code> (which blocks indefinitely) and <code>Child::try_wait()</code> (which checks without blocking), but has no built-in <em>wait with timeout</em>. If an operator configures a proxy wrapper script that waits on standard input, a standard <code>Command::output()</code> would hang the process forever, freezing UI widgets like the Omarchy bar.</p>
+
+<p>To solve this cleanly without external crates, <code>version_probe.rs</code> uses a background waiter thread and an <code>mpsc</code> channel with <code>recv_timeout</code>:</p>
+
+<pre><code>fn run_proxy_version_command(path: &Path) -> Result<ProxyVersionOutput, ProxyVersionError> {
+    let child = spawn_version_probe(path)?;
+    let pid = child.id();
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(PROXY_VERSION_TIMEOUT) {
+        Ok(Ok(output)) => Ok(ProxyVersionOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }),
+        Ok(Err(err)) => Err(ProxyVersionError::WaitFailed {
+            detail: err.to_string(),
+        }),
+        Err(RecvTimeoutError::Timeout) => {
+            terminate_version_probe(pid);
+            Err(ProxyVersionError::TimedOut)
+        }
+        Err(RecvTimeoutError::Disconnected) => Err(ProxyVersionError::WaitFailed {
+            detail: "version probe wait thread ended without a result".to_string(),
+        }),
+    }
+}</code></pre>
+<p class="src">src/env/version_probe.rs:106–149</p>
+
+<h3>Two critical subprocess engineering details</h3>
+
+<ol>
+  <li><strong>Deadlock prevention via concurrent pipe draining:</strong> Operating system pipe buffers are typically 64 KB. If a child writes extensive output to stdout or stderr while the parent waits without reading, the child blocks on <code>write()</code> and deadlocks. Calling <code>child.wait_with_output()</code> inside the thread automatically drains both pipes concurrently.</li>
+  <li><strong>Process group termination:</strong> When spawning the child, the adapter configures <code>.process_group(0)</code>:
+    <pre><code>fn spawn_version_probe(path: &Path) -> Result<Child, ProxyVersionError> {
+    Command::new(path)
+        .arg("-v")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|err| ProxyVersionError::SpawnFailed {
+            detail: err.to_string(),
+        })
+}</code></pre>
+    <p class="src">src/env/version_probe.rs:154–164</p>
+    <p>On timeout, <code>terminate_version_probe</code> kills the entire process group using <code>kill_process_group(pid, Signal::KILL)</code> via the <code>rustix</code> crate. If a wrapper shell script spawned a background child (such as <code>sleep</code>), killing only the top-level shell PID would leave the child running and holding open the output pipes.</p>
+  </li>
+</ol>
+
+<div class="note">
+  <span class="label">Benchmark Discovery</span>
+  <p>An earlier implementation polled <code>try_wait()</code> inside a 20 ms sleep loop. Benchmarking showed that while <code>cloud-sql-proxy -v</code> executes in only ~9 ms, the 20 ms poll quantum artificially inflated doctor latency to ~48 ms. Switching to the blocking channel <code>recv_timeout</code> reduced doctor execution time to ~35 ms, waking up instantly upon process completion.</p>
+</div>
+
+<h2>4. Systemd journal streaming (<code>src/journal.rs</code>)</h2>
+
+<p>When an operator runs <code>cloud-sql-tracker logs fe-dev</code> or doctor checks journal accessibility, the control plane needs to read logs from systemd's user journal. Rather than linking against heavy C libraries (<code>libsystemd</code>) or complex log-parsing crates, the adapter shells out directly to <code>journalctl</code>.</p>
+
+<pre><code>pub(crate) fn dump(unit: &UnitName, lines: u32) -> Result<Dump, JournalError> {
+    let unit_arg = format!("--unit={}", unit.as_str());
+    let lines_arg = lines.to_string();
+    let output = run_journalctl(&[
+        "--user",
+        &unit_arg,
+        "--no-pager",
+        "--quiet",
+        "-n",
+        &lines_arg,
+        "-o",
+        "short-iso",
+    ])?;
+    Ok(dump_from_output(output))
+}
+
+fn dump_from_output(output: Output) -> Dump {
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        Dump::Empty
+    } else {
+        Dump::Bytes(output.stdout)
+    }
+}</code></pre>
+<p class="src">src/journal.rs:63–88</p>
+
+<h3>Separation of concerns: <code>Dump</code> enum</h3>
+
+<p>The <code>journal</code> module preserves raw bytes without altering encoding:</p>
+
+<pre><code>#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Dump {
+    Empty,
+    Bytes(Vec<u8>),
+}</code></pre>
+<p class="src">src/journal.rs:25–29</p>
+
+<p><code>journal.rs</code> does not format terminal UI messages or decide process exit codes. If <code>dump</code> returns <code>Dump::Empty</code>, the <code>cli</code> layer decides whether to print a human-readable hint (e.g. <em>"no logs found for fe-dev"</em>) to <code>stderr</code>. If it returns <code>Dump::Bytes</code>, <code>cli</code> streams the raw output directly to <code>stdout</code>.</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>port::observe</code> return a three-way <code>PortProbe</code> enum (<code>Open</code>, <code>Closed</code>, <code>Unreachable</code>) instead of a simple boolean <code>is_open: bool</code>?
+      <details><summary>Answer</summary><p>A boolean cannot distinguish between an actively refused connection (the port is definitely closed and available) and a timeout or firewall error (unreachable). Treating timeouts as closed would produce false passes in health checks.</p></details>
+    </li>
+    <li>Why does <code>version_probe.rs</code> configure a new process group (<code>process_group(0)</code>) and terminate with <code>kill_process_group</code> on timeout?
+      <details><summary>Answer</summary><p>If the configured proxy executable is a shell script that launches helper subprocesses (like <code>sleep</code>), killing only the parent shell PID leaves helper processes alive and holding stdout/stderr pipes open, preventing clean termination.</p></details>
+    </li>
+    <li>Why does <code>cloud-sql-tracker start</code> deliberately avoid running the version identity probe that <code>doctor</code> runs?
+      <details><summary>Answer</summary><p>Startup is performance-critical and should remain fast. Running a version probe subprocess on every start invocation would add unnecessary latency, whereas <code>start</code> only needs to resolve the executable path to launch the transient unit.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/modules.v1.md">docs/modules.v1.md</a> and <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0004-rust-toolchain-and-linux-io.md">ADR 0004</a> — architectural contracts defining Linux I/O boundaries and adapter separation.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="07-supervisor.html">&larr; 07. Talking to systemd</a>
+  <a href="../index.html">Contents</a>
+  <a href="09-commands.html">09. The commands seam &rarr;</a>
+</nav>
+
+</body>
+</html>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11. Proving it works — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part V &rsaquo; Chapter 11</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 11 &middot; Part V</p>
+  <h1>Proving it works</h1>
+  <p class="lede">How cloud-sql-tracker guarantees correctness across 276 tests: pure-seam unit tests, golden schema checks, real binary subprocess verification, and human dogfooding.</p>
+</header>
+
+<h2>The verification ladder</h2>
+
+<p>A desktop infrastructure tool that controls background database proxies cannot afford flaky tests, stale mocks, or untested wire formats. If <strong>cloud-sql-tracker</strong> emits invalid JSON, the Omarchy desktop status bar breaks. If port classification misidentifies a listener PID, an operator might accidentally kill a foreign process or fail to notice a port conflict.</p>
+
+<p>Rather than relying on a slow, brittle end-to-end test suite that requires live Google Cloud instances and a running systemd daemon, the project uses a four-layer <strong>verification ladder</strong>:</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│ Layer 4: Human Dogfood Gate (Issue #46)               │
+│  - 7 golden Connections on real Arch Linux desktop     │
+│  - Live proxies, real ADC tokens, DBeaver database SQL │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ Layer 2: Real Binary Stdout Proof (tests/cli_*.rs)     │
+│  - Spawns CARGO_BIN_EXE_cloud-sql-tracker subprocess   │
+│  - status --json / doctor --json stdout vs JSON Schema │
+│  - Binary CLI argv & exit code smoke tests (0, 2, 3)   │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ Layer 1: Schema Contract Proof (validate-contracts.sh) │
+│  - check-jsonschema on all examples/ vs schemas/*.json │
+│  - Executed on git pre-push and GitHub Actions CI      │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ Pure Seams: 265 Unit Tests (Fast, In-Memory, No I/O)   │
+│  - Reconcile truth table (all 13 state permutations)   │
+│  - Config validation & default inheritance rules       │
+│  - Batch exit code calculations & selector resolution  │
+└────────────────────────────────────────────────────────┘</div>
+
+<p>Across the entire project, <strong>276 automated tests</strong> run in roughly 2 seconds without external cloud credentials:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Test Suite</th>
+      <th>Test Count</th>
+      <th>Execution Method</th>
+      <th>External Dependencies</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>src/lib.rs</code> (Unit Tests)</td>
+      <td>265</td>
+      <td>In-memory unit tests</td>
+      <td>None (Pure logic, localhost sockets)</td>
+    </tr>
+    <tr>
+      <td><code>tests/cli_json_contracts.rs</code> (Layer 2)</td>
+      <td>6</td>
+      <td>Spawns built binary via <code>Command</code></td>
+      <td>None (Temp config files)</td>
+    </tr>
+    <tr>
+      <td><code>tests/cli_smoke.rs</code> (CLI Smokes)</td>
+      <td>5</td>
+      <td>Spawns built binary via <code>Command</code></td>
+      <td>None (Temp config files)</td>
+    </tr>
+    <tr>
+      <td><code>scripts/validate-contracts.sh</code> (Layer 1)</td>
+      <td>3 schemas</td>
+      <td><code>check-jsonschema</code> CLI tool</td>
+      <td>Python schema validator</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>1. Pure-seam unit tests</h2>
+
+<p>The foundation of the test suite rests on <a href="06-reconcile.html">pure functions</a>. Because business logic is decoupled from system calls, edge cases can be tested exhaustively without faking complex system state.</p>
+
+<h3>Reconcile truth table</h3>
+
+<p>In <a href="06-reconcile.html">Chapter 06</a>, we saw that <code>reconcile()</code> accepts a <code>Connection</code> definition, an <code>Observation</code> snapshot, and an injected <code>now: SystemTime</code> timestamp. Because time and I/O are parameters, unit tests verify every row of the 13-row state transition table deterministically:</p>
+
+<pre><code>#[test]
+fn activating_within_start_window_is_starting_without_attributed_process() {
+    let unit = unit_with(
+        UnitState::Activating,
+        None,
+        Some(now() - Duration::from_secs(5)),
+    );
+    let row = reconcile(
+        &connection("fe-dev", 15432),
+        &observe(unit, closed_port()),
+        now(),
+    );
+    assert_eq!(row.state, HealthState::Starting);
+    assert_eq!(row.source, Source::None);
+    assert_eq!(row.pid, None);
+}</code></pre>
+<p class="src">src/reconcile.rs:621–636</p>
+
+<h3>Configuration validation rules</h3>
+
+<p>The configuration loader in <code>src/config.rs</code> verifies that invalid JSON structures, duplicate identifiers, and reserved ports fail immediately during parsing:</p>
+
+<pre><code>#[test]
+fn parse_rejects_reserved_ports() {
+    for port in [1, 1023, 5432, 3306, 1433] {
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": {port}}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("reserved/privileged port must reject");
+        assert!(
+            matches!(err, ConfigError::InvalidConnection { .. }),
+            "port {port}"
+        );
+    }
+}</code></pre>
+<p class="src">src/config.rs:370–380</p>
+
+<h3>Multi-target exit code resolution</h3>
+
+<p>In <code>src/cli.rs</code>, the pure function <code>exit_for_batch()</code> maps multi-connection outcomes to exit codes <code>0</code>, <code>1</code>, <code>2</code>, <code>3</code>, or <code>4</code>. Unit tests prove priority ordering without running subprocesses:</p>
+
+<pre><code>#[test]
+fn exit_for_batch_prefers_three_for_any_dependency_failure() {
+    let outcome = outcome(vec![
+        TargetResult::Succeeded,
+        TargetResult::Dependency {
+            message: "no bus".to_string(),
+        },
+    ]);
+    assert_eq!(exit_for_batch(&outcome), 3);
+}</code></pre>
+<p class="src">src/cli.rs:690–699</p>
+
+<div class="pure">
+  <span class="label">Pure</span>
+  <p><strong>No mock traits:</strong> The codebase contains no <code>trait Supervisor</code> or <code>trait Clock</code>. Pure functions accept plain structs and primitives, making test mocks completely unnecessary.</p>
+</div>
+
+<h2>2. Layer 1: Schema contract verification</h2>
+
+<p>Every JSON surface in the project (<a href="../reference/glossary.html#status-document">Status document</a>, <a href="../reference/glossary.html#doctor-report">Doctor report</a>, and configuration) has a matching JSON Schema in <code>schemas/</code> and a golden reference in <code>examples/</code>. Layer 1 verifies that the golden example files strictly adhere to their JSON Schemas using a dedicated shell script:</p>
+
+<pre><code>#!/usr/bin/env bash
+# Layer 1 of issue #23: golden examples vs JSON Schemas.
+# This script is the pair registry. Call it from mise, hk pre-push, and CI.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+check() {
+  local schema="$1"
+  local instance="$2"
+  echo "validate '${instance}' against '${schema}'"
+  check-jsonschema --schemafile "${schema}" "${instance}"
+}
+
+check schemas/status.v1.json examples/status.v1.json
+check schemas/config.v1.json examples/connections.json
+check schemas/doctor.v1.json examples/doctor.v1.json</code></pre>
+<p class="src">scripts/validate-contracts.sh:1–19</p>
+
+<p>This script runs locally on <code>mise run check</code>, during git pre-push hooks (via <code>hk</code>), and in GitHub Actions CI.</p>
+
+<h2>3. Layer 2: Built binary stdout testing</h2>
+
+<p>Passing in-process Rust serialization tests (testing that <code>serde_json::to_value(&amp;status_doc)</code> matches a schema) is a necessary step, but it is <strong>not sufficient</strong>. In-process tests do not prove that:</p>
+
+<ul>
+  <li>The compiled binary's CLI flag parsing correctly routes to the JSON formatter.</li>
+  <li>The output is emitted on <code>stdout</code> rather than corrupted by logs or error messages printed to <code>stderr</code>.</li>
+  <li>The executable exits with the exact status code specified in the CLI contract.</li>
+</ul>
+
+<p>Layer 2 tests live in <code>tests/cli_json_contracts.rs</code> and <code>tests/cli_smoke.rs</code>. They spawn the actual compiled binary using Cargo's environment variable <code>env!("CARGO_BIN_EXE_cloud-sql-tracker")</code> and validate raw stdout bytes against JSON Schemas using the <code>jsonschema</code> crate.</p>
+
+<pre><code>fn bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_cloud-sql-tracker"))
+}
+
+fn assert_validates(schema_relative_path: &str, instance: &serde_json::Value) {
+    let schema = read_schema(schema_relative_path);
+    let validator =
+        jsonschema::validator_for(&schema).expect("compile schema (checked in and Layer-1-clean)");
+    let errors: Vec<String> = validator
+        .iter_errors(instance)
+        .map(|error| format!("{}: {error}", error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "{schema_relative_path} rejected instance:\n{}\n\ninstance:\n{}",
+        errors.join("\n"),
+        serde_json::to_string_pretty(instance).unwrap_or_default(),
+    );
+}</code></pre>
+<p class="src">tests/cli_json_contracts.rs:88–117</p>
+
+<h3>The headless CI challenge: zero vs non-zero connections</h3>
+
+<p>When <code>status --json</code> runs with configured connections, it attempts to query systemd over D-Bus via <code>zbus</code>. However, some CI runners (such as minimal container environments or SSH runners) lack an active systemd user bus.</p>
+
+<p>To ensure CI never skips Layer 2 validation while remaining green across different runner environments, the test suite splits into two distinct integration tests:</p>
+
+<ol>
+  <li><strong>Unconditional Zero-Connections Test:</strong> A configuration with <code>"connections": []</code> produces a valid Status document without ever calling D-Bus or socket probes. This test <em>must always pass with exit code 0</em> on every environment:
+    <pre><code>#[test]
+fn status_json_stdout_with_zero_connections_validates_against_the_status_schema() {
+    let config = ConfigFixture::write(EMPTY_CONFIG);
+    let output = bin()
+        .args(["--config", config.path().to_str().unwrap(), "status", "--json"])
+        .output()
+        .expect("spawn the binary");
+
+    assert_eq!(output.status.code(), Some(0));
+    let instance = parse_stdout_json(&output.stdout);
+    assert_validates("schemas/status.v1.json", &instance);
+    assert_eq!(instance["total"], 0);
+}</code></pre>
+    <p class="src">tests/cli_json_contracts.rs:136–160</p>
+  </li>
+  <li><strong>Populated Connections Test with Graceful Dependency Handling:</strong> When testing populated connection arrays, if the environment completely lacks a systemd user manager, the CLI exits with code <code>3</code> (Dependency Failure). The test inspects <code>stderr</code>: if the exit is genuinely due to an absent bus, it logs a skip; but if the bus responded and returned malformed data (a schema regression), the test panics:
+    <pre><code>#[test]
+fn status_json_stdout_validates_against_the_status_schema() {
+    let config = ConfigFixture::write(MINIMAL_CONFIG);
+    let output = bin()
+        .args(["--config", config.path().to_str().unwrap(), "status", "--json"])
+        .output()
+        .expect("spawn the binary");
+
+    match output.status.code() {
+        Some(0) => {
+            let instance = parse_stdout_json(&output.stdout);
+            assert_validates("schemas/status.v1.json", &instance);
+        }
+        Some(3) if stderr_indicates_no_systemd_user_manager(&output.stderr) => {
+            eprintln!("SKIP (environment): no systemd user manager reachable");
+        }
+        other => panic!("unexpected exit {other:?} for status --json"),
+    }
+}</code></pre>
+    <p class="src">tests/cli_json_contracts.rs:172–211</p>
+  </li>
+</ol>
+
+<h2>4. Binary smoke tests</h2>
+
+<p>In <code>tests/cli_smoke.rs</code>, lightweight tests verify flag parsing and error handling without using heavy testing frameworks like <code>assert_cmd</code>:</p>
+
+<pre><code>#[test]
+fn version_prints_the_bare_cargo_package_version() {
+    let output = bin().arg("--version").output().expect("spawn the binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert_eq!(stdout.trim(), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn start_without_a_target_exits_usage() {
+    let config = ConfigFixture::write(MINIMAL_CONFIG);
+    let status = bin()
+        .args(["--config", config.path().to_str().unwrap(), "start"])
+        .status()
+        .expect("spawn the binary");
+    assert_eq!(status.code(), Some(2));
+}</code></pre>
+<p class="src">tests/cli_smoke.rs:54–89</p>
+
+<h2>5. Case study: the ETXTBSY parallelism flake</h2>
+
+<div class="trap">
+  <span class="label">Lesson learned</span>
+  <p><strong>Do not guess at root causes.</strong> When implementing the <code>proxy_bin</code> version probe, tests creating temporary shell scripts began intermittently failing with <code>Text file busy (os error 26)</code> during parallel <code>cargo test</code> runs.</p>
+</div>
+
+<p>A code reviewer initially claimed that flushing writes with <code>fsync</code> and performing an atomic rename would fix the issue. However, empirical measurement proved the reviewer wrong: <code>main</code> was 10/10 clean, but the change failed 5 out of 10 runs even with atomic renames.</p>
+
+<p>The actual Linux kernel behavior: <code>execve()</code> returns <code>ETXTBSY</code> if <em>any</em> thread in the entire process holds a writable file descriptor or memory mapping to that inode. Because Rust's test harness executes unit tests as multiple concurrent OS threads within a single process, writing temporary scripts in one test raced with <code>execve()</code> calls in another test.</p>
+
+<p>The architectural rule established from this incident (<a href="https://github.com/golgor/cloud-sql-tracker/issues/82">Issue #82</a>):</p>
+
+<ol>
+  <li><strong>Keep production code clean:</strong> In production, <code>cloud-sql-proxy</code> is never written by the tracker CLI, so production code uses a single, plain <code>Command::spawn()</code> with zero retry loops.</li>
+  <li><strong>Isolate test workarounds to test code:</strong> The retry logic was placed strictly inside <code>#[cfg(test)]</code> helper functions:</li>
+</ol>
+
+<pre><code>#[cfg(test)]
+fn probe_proxy_version_for_test(path: &Path) -> Result<String, ProxyVersionError> {
+    const ATTEMPTS: usize = 3;
+    const BACKOFF: Duration = Duration::from_millis(5);
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        match probe_proxy_version(path) {
+            Err(ProxyVersionError::SpawnFailed { detail })
+                if detail.contains("Text file busy") =>
+            {
+                last = Some(ProxyVersionError::SpawnFailed { detail });
+                std::thread::sleep(BACKOFF);
+            }
+            other => return other,
+        }
+    }
+    Err(last.expect("loop runs at least once"))
+}</code></pre>
+<p class="src">src/env/version_probe.rs:286–306</p>
+
+<h2>6. The human dogfood gate</h2>
+
+<p>Automated tests verify contracts and logic, but they cannot verify real-world developer ergonomics, desktop notification interaction, or actual database network packets. Before closing the v1 implementation milestone (<a href="https://github.com/golgor/cloud-sql-tracker/issues/28">Map #28</a>), the operator completed a strict human verification checklist on a live Arch Linux workstation (<a href="https://github.com/golgor/cloud-sql-tracker/issues/46">Issue #46</a>):</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Checklist Item</th>
+      <th>Verification Method</th>
+      <th>Outcome</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Preflight health</td>
+      <td>Run <code>cloud-sql-tracker doctor</code></td>
+      <td>Passed with <code>ok: true</code>, resolving proxy v2.25.2 and valid ADC.</td>
+    </tr>
+    <tr>
+      <td>All 7 proxies</td>
+      <td>Execute <code>cloud-sql-tracker start --all</code></td>
+      <td>All 7 transient units created; ports 15432–15438 listening.</td>
+    </tr>
+    <tr>
+      <td>Real traffic</td>
+      <td>Connect via DBeaver / psql to each group</td>
+      <td>Queries executed successfully through local ports.</td>
+    </tr>
+    <tr>
+      <td>Journal logs</td>
+      <td>Run <code>cloud-sql-tracker logs fe-dev</code></td>
+      <td>Correct systemd user journal entries printed to stdout.</td>
+    </tr>
+    <tr>
+      <td>Clean stop</td>
+      <td>Execute <code>cloud-sql-tracker stop --all</code></td>
+      <td>All transient units terminated with <code>SIGTERM</code> (exit code 0).</td>
+    </tr>
+  </tbody>
+</table>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why are in-process serde serialization tests insufficient to prove Layer 2 contract compliance?
+      <details><summary>Answer</summary><p>In-process serde tests only prove that Rust data structures match a schema, but cannot prove that the compiled binary parses CLI arguments correctly, emits valid JSON directly to stdout without stderr pollution, or exits with the right process exit code.</p></details>
+    </li>
+    <li>How does the test suite ensure Layer 2 tests run reliably in CI environments without a systemd user daemon?
+      <details><summary>Answer</summary><p>The suite uses an unconditional test with zero connections that requires no D-Bus calls, while allowing tests with populated connections to gracefully skip only when stderr confirms the user bus is unreachable.</p></details>
+    </li>
+    <li>Why was the ETXTBSY retry logic placed inside <code>#[cfg(test)]</code> rather than inside production spawn code?
+      <details><summary>Answer</summary><p>Production never writes proxy executables so it cannot trigger file-busy errors, whereas the multi-threaded test runner creates and executes temporary script files concurrently across test threads.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/verification.v1.md">docs/verification.v1.md</a> &middot; The normative test strategy and human dogfooding contract for cloud-sql-tracker v1.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="10-cli.html">&larr; 10. The thin shell</a>
+  <a href="../index.html">Contents</a>
+  <a href="12-shipping-it.html">12. Shipping it &rarr;</a>
+</nav>
+
+</body>
+</html>

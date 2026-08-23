@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>07. Talking to systemd — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part III &rsaquo; Chapter 07</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 07 &middot; Part III</p>
+  <h1>Talking to systemd</h1>
+  <p class="lede">How cloud-sql-tracker supervises background database proxies as transient systemd services over native D-Bus IPC, avoiding subprocess shell-outs and unmanaged background daemons.</p>
+</header>
+
+<h2>The native Linux supervision model</h2>
+
+<p>In <a href="03-the-shape.html">Chapter 03</a>, we saw that <code>cloud-sql-tracker</code> is a stateless CLI rather than a long-lived daemon. When an operator starts a <a href="../reference/glossary.html#connection">Connection</a>, the CLI does not spawn a background thread or detach a child process using fork-and-forget. Instead, it delegates process lifecycle management directly to the Linux service manager.</p>
+
+<p>To understand how this works in code, we need four foundational Linux concepts:</p>
+
+<ul>
+  <li><strong>systemd --user:</strong> A per-user instance of systemd that manages user session services. Unlike the system-wide service manager (PID 1), it runs unprivileged within the user's session and manages background jobs tied to that user.</li>
+  <li><strong>D-Bus:</strong> The standard Linux inter-process communication (IPC) system. It provides a structured, object-oriented message bus where programs invoke methods and inspect properties on registered services.</li>
+  <li><strong>zbus:</strong> A pure-Rust D-Bus crate that provides type-safe, high-performance synchronous and asynchronous connections to the D-Bus daemon.</li>
+  <li><strong>transient unit:</strong> A dynamic systemd service created in-memory at runtime via D-Bus (<code>cloud-sql-proxy-&lt;id&gt;.service</code>) rather than read from persistent unit files on disk in <code>~/.config/systemd/user/</code>.</li>
+</ul>
+
+<div class="diagram">┌────────────────────────────────────────────────────────────────────────┐
+│ cloud-sql-tracker (Rust CLI)                                           │
+│  └─ src/supervisor.rs                                                  │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ zbus (session bus connection)
+                                    │ Destination: org.freedesktop.systemd1
+                                    │ Interface:   org.freedesktop.systemd1.Manager
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ systemd --user                                                         │
+│  ├─ Method: StartTransientUnit("cloud-sql-proxy-fe-dev.service", ...)  │
+│  ├─ Method: StopUnit("cloud-sql-proxy-fe-dev.service", "replace")      │
+│  ├─ Method: GetUnit / Properties.GetAll                                │
+│  └─ Transient Service: cloud-sql-proxy-fe-dev.service                  │
+│      └─ ExecStart: /usr/bin/cloud-sql-proxy --address=...              │
+└────────────────────────────────────────────────────────────────────────┘</div>
+
+<h2>Why native D-Bus over systemctl shell-outs</h2>
+
+<p>As documented in <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0004-rust-toolchain-and-linux-io.md">ADR 0004</a> and research brief <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/research/supervisor-io.md"><code>docs/research/supervisor-io.md</code></a>, the project evaluated two ways to interact with systemd:</p>
+
+<ol>
+  <li>Shelling out to CLI binaries: spawning <code>systemd-run --user</code> and parsing <code>systemctl --user show</code> text output.</li>
+  <li>Communicating natively over D-Bus using <code>zbus</code>.</li>
+</ol>
+
+<div class="why">
+  <span class="label">Why</span>
+  <p><strong>Pick:</strong> Use native D-Bus calls via <code>zbus</code> on the user session bus.<br>
+  <strong>Why:</strong> D-Bus provides strongly-typed properties (such as <code>MainPID: u32</code> and integer microsecond timestamps) and explicit error variants (such as <code>NoSuchUnit</code>). Shelling out to <code>systemctl show</code> requires fragile string parsing, spawns subprocesses on every check, and suffers from misleading exit codes—for example, <code>systemctl show</code> exits with status <code>0</code> even when a unit does not exist!<br>
+  <strong>Discarded:</strong> Subprocess shell-outs to <code>systemd-run</code> / <code>systemctl</code>, and speculative traits like <code>trait Supervisor</code>.<br>
+  <strong>Unchanged:</strong> <code>journalctl</code> remains a subprocess shell-out for logs, because text log streaming is already its native interface.</p>
+</div>
+
+<p>The implementation in <code>src/supervisor.rs</code> defines the standard D-Bus destination and interface constants:</p>
+
+<pre><code>const SYSTEMD_DESTINATION: &str = "org.freedesktop.systemd1";
+const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
+const MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
+const PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
+const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
+const SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
+
+/// The D-Bus error systemd returns from `GetUnit`/`StopUnit` for a Unit name
+/// it has never loaded — a successful "absent" outcome, not an I/O error
+/// (`docs/research/supervisor-io.md`, "Failure classification").
+const NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";</code></pre>
+<p class="src">src/supervisor.rs:21–31</p>
+
+<h2>Starting a proxy: <code>start_transient</code></h2>
+
+<p>To start a proxy, <code>start_transient</code> calls the systemd manager's <code>StartTransientUnit</code> method. Before it can do that safely, however, it must address a subtle systemd lifecycle quirk.</p>
+
+<div class="trap">
+  <span class="label">The UnitExists Gotcha</span>
+  <p>When a transient unit crashes or fails, systemd does not immediately unload it from memory; it keeps the unit in state <code>ActiveState=failed</code>. If the operator subsequently calls <code>StartTransientUnit</code> with that same unit name, systemd rejects the call with an error: <code>UnitExists</code>. To prevent this, <code>start_transient</code> best-effort invokes <code>ResetFailedUnit</code> first, clearing any residual failure state.</p>
+</div>
+
+<p>Here is the full <code>start_transient</code> implementation in <code>src/supervisor.rs</code>:</p>
+
+<pre><code>/// Start `connection`'s Proxy as a transient `Type=exec` Unit
+/// (`docs/research/supervisor-io.md`, "v1 D-Bus calls", `start_transient`).
+///
+/// `env` is the already-resolved environment to forward (e.g. `HOME`,
+/// `GOOGLE_APPLICATION_CREDENTIALS`) — this module does not resolve ADC or
+/// `PATH` itself; that is `env`'s job (`docs/modules.v1.md`, "env").
+///
+pub(crate) fn start_transient(
+    connection: &Connection,
+    proxy_bin: &Path,
+    env: &[(String, String)],
+) -> Result<(), SupervisorError> {
+    let unit = model::unit_name(&connection.id)?;
+    let conn = connect()?;
+    let manager = manager_proxy(&conn)?;
+
+    // A Unit that ended up `ActiveState=failed` (crash, exec failure, ...)
+    // stays loaded until something clears it — `StartTransientUnit` then
+    // rejects the same unit name with systemd's `UnitExists`. `stop`
+    // already clears this after a successful `StopUnit`
+    // (`docs/modules.v1.md`, "supervisor": "reset-failed after stop (and
+    // on restart)"), but a plain `start` on a Connection nobody stopped
+    // first (e.g. right after the proxy crashed on its own) never goes
+    // through `stop`. Best-effort here too: a failed reset must not abort
+    // the start attempt — `StartTransientUnit` below is the call that
+    // actually needs to succeed.
+    let _: Result<(), zbus::Error> = manager.call("ResetFailedUnit", &(unit.as_str(),));
+
+    let exec_start: Vec<(String, Vec<String>, bool)> = vec![(
+        proxy_bin.display().to_string(),
+        proxy_argv(connection, proxy_bin),
+        false,
+    )];
+    let environment: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+
+    let properties: Vec<(&str, Value<'_>)> = vec![
+        (
+            "Description",
+            Value::new(format!("Cloud SQL Auth Proxy ({})", connection.id)),
+        ),
+        ("Type", Value::new("exec")),
+        ("KillMode", Value::new("control-group")),
+        ("TimeoutStopUSec", Value::new(TIMEOUT_STOP_USEC)),
+        ("Restart", Value::new("no")),
+        ("Environment", Value::new(environment)),
+        ("ExecStart", Value::new(exec_start)),
+    ];
+    let aux: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
+
+    manager
+        .call::<_, _, OwnedObjectPath>(
+            "StartTransientUnit",
+            &(unit.as_str(), "fail", properties, aux),
+        )
+        .map_err(SupervisorError::Call)?;
+    Ok(())
+}</code></pre>
+<p class="src">src/supervisor.rs:316–371</p>
+
+<h3>The transient unit properties explained</h3>
+
+<p>Every D-Bus property passed in <code>properties</code> enforces a deliberate operational constraint:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Property</th>
+      <th>Value</th>
+      <th>Purpose &amp; Operational Rationale</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Description</code></td>
+      <td><code>Cloud SQL Auth Proxy (&lt;id&gt;)</code></td>
+      <td>Human-readable string appearing in system logs and journal entries.</td>
+    </tr>
+    <tr>
+      <td><code>Type</code></td>
+      <td><code>"exec"</code></td>
+      <td>Unlike <code>Type=simple</code> (which reports immediate start before executing), <code>Type=exec</code> delays reporting success until systemd has executed the binary via <code>execve</code>. If the binary is missing or lacks executable permissions, start fails immediately.</td>
+    </tr>
+    <tr>
+      <td><code>KillMode</code></td>
+      <td><code>"control-group"</code></td>
+      <td>When stopping the unit, systemd signals all processes in the unit's cgroup, ensuring any child helpers or shell wrappers are cleanly terminated.</td>
+    </tr>
+    <tr>
+      <td><code>TimeoutStopUSec</code></td>
+      <td><code>30_000_000</code> (30s)</td>
+      <td>Grace period between sending <code>SIGTERM</code> and forcing process termination with <code>SIGKILL</code>.</td>
+    </tr>
+    <tr>
+      <td><code>Restart</code></td>
+      <td><code>"no"</code></td>
+      <td>Systemd will <strong>never</strong> restart a crashed proxy automatically. Crashes remain visible as <code>error</code> in the status report until the operator investigates.</td>
+    </tr>
+    <tr>
+      <td><code>Environment</code></td>
+      <td><code>["HOME=...", ...]</code></td>
+      <td>Forwards necessary environment variables, such as <code>GOOGLE_APPLICATION_CREDENTIALS</code> (ADC), into the spawned proxy environment.</td>
+    </tr>
+    <tr>
+      <td><code>ExecStart</code></td>
+      <td><code>a(sasb)</code> structure</td>
+      <td>The command specification: binary path, argument vector, and a boolean indicating whether exit code errors are ignored (<code>false</code>).</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Building the proxy argv: <code>proxy_argv</code></h2>
+
+<p>When systemd executes the proxy binary, it runs the exact argument vector constructed by <code>proxy_argv</code>:</p>
+
+<pre><code>/// Always appended exactly once by [`proxy_argv`], even if `extra_args`
+/// already repeats it.
+const EXIT_ZERO_ON_SIGTERM: &str = "--exit-zero-on-sigterm";
+
+/// The proxy argv for `ExecStart`, in the order
+/// `docs/research/supervisor-io.md` ("v1 D-Bus calls", `ExecStart`)
+/// specifies. `argv[0]` is always the absolute binary path (`execve`
+/// convention). `--auto-iam-authn` is not in that doc's template but is a
+/// frozen config flag (`docs/config.v1.md`, "Connection fields",
+/// `auto_iam_authn`) — grouped with the other boolean flags.
+fn proxy_argv(connection: &Connection, proxy_bin: &Path) -> Vec<String> {
+    let mut argv = vec![
+        proxy_bin.display().to_string(),
+        format!("--address={}", connection.address),
+        format!("--port={}", connection.port),
+    ];
+    if connection.private_ip {
+        argv.push("--private-ip".to_string());
+    }
+    if connection.auto_iam_authn {
+        argv.push("--auto-iam-authn".to_string());
+    }
+    // A configured `extra_args` may already repeat this flag; keep exactly
+    // one copy, immediately before the final INSTANCE argument
+    // (`docs/research/supervisor-io.md`).
+    argv.extend(
+        connection
+            .extra_args
+            .iter()
+            .filter(|arg| arg.as_str() != EXIT_ZERO_ON_SIGTERM)
+            .cloned(),
+    );
+    argv.push(EXIT_ZERO_ON_SIGTERM.to_string());
+    argv.push(connection.instance.clone());
+    argv
+}</code></pre>
+<p class="src">src/supervisor.rs:373–408</p>
+
+<div class="note">
+  <span class="label">The Clean Exit Invariant</span>
+  <p>By default, Google's <code>cloud-sql-proxy</code> treats <code>SIGTERM</code> as an abnormal termination and exits with status <code>143</code> or <code>1</code>. Systemd would then record <code>Result=exit-code</code> and classify the unit as failed. By unconditionally appending <code>--exit-zero-on-sigterm</code>, the proxy exits with status code <code>0</code> on standard shutdown. As explored in <a href="06-reconcile.html">Chapter 06</a>, this is what allows Reconcile to distinguish an intentional stop from a crash.</p>
+</div>
+
+<h2>Inspecting state: <code>show</code> and <code>UnitSnapshot</code></h2>
+
+<p>When the control plane queries status via <code>show</code>, it queries systemd for the unit's object path and reads properties across both <code>org.freedesktop.systemd1.Unit</code> and <code>org.freedesktop.systemd1.Service</code> interfaces.</p>
+
+<pre><code>/// Everything Reconcile's clean-stop-vs-crash table needs about one Unit,
+/// from a single `show` call (`docs/modules.v1.md`, "supervisor").
+///
+/// This module does not classify clean stop vs crash itself — that
+/// judgement belongs to `reconcile` (pure), which this module does not
+/// import (`docs/modules.v1.md`, "Dependency direction"). `commands` maps
+/// a `Loaded` snapshot into `reconcile::UnitObservation`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnitSnapshot {
+    /// `LoadState=not-found`: systemd has never loaded this Unit.
+    Absent,
+    Loaded {
+        active_state: UnitActiveState,
+        /// Raw `SubState` (e.g. `running`, `dead`, `start-pre`). Diagnostic
+        /// detail only — Reconcile's truth table does not branch on it.
+        sub_state: String,
+        /// `MainPID`; `None` when systemd reports `0` (no live process).
+        main_pid: Option<u32>,
+        result: UnitResult,
+        exec_outcome: ExecOutcome,
+        /// `ExecMainStartTimestampMonotonic`; `None` when systemd reports
+        /// `0` (unknown / no start attempt yet).
+        started_at_monotonic_usec: Option<u64>,
+    },
+}</code></pre>
+<p class="src">src/supervisor.rs:49–76</p>
+
+<p>The query logic cleanly handles missing units by catching the <code>NoSuchUnit</code> D-Bus error:</p>
+
+<pre><code>/// Load/missing plus everything Reconcile needs about one Unit
+/// (`docs/modules.v1.md`, "supervisor").
+pub(crate) fn show(unit: &UnitName) -> Result<UnitSnapshot, SupervisorError> {
+    let conn = connect()?;
+    let manager = manager_proxy(&conn)?;
+
+    let object_path: OwnedObjectPath = match manager.call("GetUnit", &(unit.as_str(),)) {
+        Ok(path) => path,
+        Err(err) if is_no_such_unit(&err) => return Ok(UnitSnapshot::Absent),
+        Err(err) => return Err(SupervisorError::Call(err)),
+    };
+
+    read_snapshot(&conn, &object_path)
+}
+
+fn read_snapshot(
+    conn: &zbus::blocking::Connection,
+    object_path: &OwnedObjectPath,
+) -> Result<UnitSnapshot, SupervisorError> {
+    let properties = properties_proxy(conn, object_path)?;
+    let unit_props = get_all_properties(&properties, UNIT_INTERFACE)?;
+    let service_props = get_all_properties(&properties, SERVICE_INTERFACE)?;
+
+    let active_state = map_active_state(required(&unit_props, "ActiveState")?);
+    let sub_state = required(&unit_props, "SubState")?;
+
+    let main_pid = match required::<u32>(&service_props, "MainPID")? {
+        0 => None,
+        pid => Some(pid),
+    };
+    let result = map_unit_result(required(&service_props, "Result")?);
+    let exec_main_code = required(&service_props, "ExecMainCode")?;
+    let exec_main_status = required(&service_props, "ExecMainStatus")?;
+    let started_at_monotonic_usec =
+        match required::<u64>(&service_props, "ExecMainStartTimestampMonotonic")? {
+            0 => None,
+            usec => Some(usec),
+        };
+
+    Ok(UnitSnapshot::Loaded {
+        active_state,
+        sub_state,
+        main_pid,
+        result,
+        exec_outcome: exec_outcome(exec_main_code, exec_main_status),
+        started_at_monotonic_usec,
+    })
+}</code></pre>
+<p class="src">src/supervisor.rs:266–313</p>
+
+<h3>Resilient property mapping</h3>
+
+<p>Systemd versions evolve over time, introducing new active states or result codes (like <code>oom-kill</code> in newer systemd releases). Rather than panicking or collapsing unknown strings into generic errors, <code>src/supervisor.rs</code> retains unrecognized values in an <code>Unknown(String)</code> variant:</p>
+
+<pre><code>#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UnitActiveState {
+    Inactive,
+    Activating,
+    Active,
+    Deactivating,
+    Failed,
+    Unknown(String),
+}
+
+fn map_active_state(raw: String) -> UnitActiveState {
+    match raw.as_str() {
+        "inactive" => UnitActiveState::Inactive,
+        "activating" => UnitActiveState::Activating,
+        "active" => UnitActiveState::Active,
+        "deactivating" => UnitActiveState::Deactivating,
+        "failed" => UnitActiveState::Failed,
+        _ => UnitActiveState::Unknown(raw),
+    }
+}</code></pre>
+<p class="src">src/supervisor.rs:84–102</p>
+
+<p>Similarly, the process exit signal is decoded using standard POSIX <code>SIGCHLD</code> codes to distinguish true exit codes from termination signals:</p>
+
+<pre><code>mod sigchld {
+    pub(super) const CLD_EXITED: i32 = 1;
+    pub(super) const CLD_KILLED: i32 = 2;
+    pub(super) const CLD_DUMPED: i32 = 3;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecOutcome {
+    /// `ExecMainCode == 0`: the Unit has no exec result yet.
+    NotExited,
+    ExitCode(i32),
+    Signal(i32),
+    /// An `ExecMainCode` this adapter does not know how to read.
+    Unknown {
+        code: i32,
+        status: i32,
+    },
+}
+
+fn exec_outcome(exec_main_code: i32, exec_main_status: i32) -> ExecOutcome {
+    match exec_main_code {
+        0 => ExecOutcome::NotExited,
+        sigchld::CLD_EXITED => ExecOutcome::ExitCode(exec_main_status),
+        sigchld::CLD_KILLED | sigchld::CLD_DUMPED => ExecOutcome::Signal(exec_main_status),
+        code => ExecOutcome::Unknown {
+            code,
+            status: exec_main_status,
+        },
+    }
+}</code></pre>
+<p class="src">src/supervisor.rs:131–163</p>
+
+<h2>Stopping and health-checking: <code>stop</code> and <code>systemd_user_check</code></h2>
+
+<p>Stopping a unit calls <code>StopUnit</code> with mode <code>"replace"</code>. If systemd returns <code>NoSuchUnit</code>, the operation succeeds idempotently (a unit that was never started is already stopped). If stopping an existing unit succeeds, it also invokes <code>ResetFailedUnit</code> to clear stale failure counters.</p>
+
+<pre><code>/// Stop `unit` (our Unit only — never kill-by-PID) and best-effort clear its
+/// failed state (`docs/modules.v1.md`, "supervisor"). A Unit systemd has
+/// never loaded is already stopped: idempotent success, not an error
+/// (`docs/research/supervisor-io.md`, "stop").
+///
+pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
+    let conn = connect()?;
+    let manager = manager_proxy(&conn)?;
+
+    match manager.call::<_, _, OwnedObjectPath>("StopUnit", &(unit.as_str(), "replace")) {
+        Ok(_) => {
+            // A failed reset-failed must not undo a successful stop.
+            let _: Result<(), zbus::Error> = manager.call("ResetFailedUnit", &(unit.as_str(),));
+            Ok(())
+        }
+        Err(err) if is_no_such_unit(&err) => Ok(()),
+        Err(err) => Err(SupervisorError::Call(err)),
+    }
+}</code></pre>
+<p class="src">src/supervisor.rs:410–428</p>
+
+<p>Finally, the <code>doctor</code> command's preflight check tests whether the user bus manager is responsive by reading its <code>Version</code> property:</p>
+
+<pre><code>/// Doctor's `systemd_user` row (`docs/doctor.v1.md`, "`systemd_user` —
+/// hard"): can this environment reach the systemd user manager at all.
+pub(crate) fn systemd_user_check() -> CheckRow {
+    match manager_version() {
+        Ok(version) => CheckRow {
+            id: "systemd_user".to_string(),
+            status: CheckStatus::Pass,
+            detail: format!("user bus ok (systemd {version})"),
+            hint: None,
+        },
+        Err(err) => CheckRow {
+            id: "systemd_user".to_string(),
+            status: CheckStatus::Fail,
+            detail: err.to_string(),
+            hint: Some(SYSTEMD_USER_HINT.to_string()),
+        },
+    }
+}
+
+fn manager_version() -> Result<String, SupervisorError> {
+    let conn = connect()?;
+    let manager = manager_proxy(&conn)?;
+    manager
+        .get_property("Version")
+        .map_err(SupervisorError::Call)
+}</code></pre>
+<p class="src">src/supervisor.rs:430–455</p>
+
+<h2>Operational consequences: statelessness and failure recovery</h2>
+
+<p>The combination of transient units, <code>Restart=no</code>, and zero state files on disk produces clear, predictable operational behaviors:</p>
+
+<ol>
+  <li><strong>Clean reboot / shutdown:</strong> Systemd transient units exist in <code>/run/user/&lt;uid&gt;/systemd/transient/</code> on <code>tmpfs</code>. When the machine shuts down or reboots, all transient units vanish completely. At next boot, no proxies restart automatically. The session begins cleanly with all connections in state <code>stopped</code>.</li>
+  <li><strong>Crash visibility:</strong> Because <code>Restart="no"</code> is configured, a proxy that crashes during a development session stays down. Systemd records <code>ActiveState=failed</code>, and the tracker reports Health state <code>error</code>. It does not enter a silent crash-restart loop that conceals configuration or credential problems.</li>
+  <li><strong>Targeted recovery:</strong> Operators recover failed proxies explicitly using <code>cloud-sql-tracker restart --failed</code>. This stops any lingering state, calls <code>ResetFailedUnit</code>, and starts a fresh transient unit.</li>
+</ol>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>start_transient</code> call <code>ResetFailedUnit</code> on the unit before calling <code>StartTransientUnit</code>?
+      <details><summary>Answer</summary><p>When a transient service fails, systemd retains the failed unit in memory; calling <code>StartTransientUnit</code> on an existing failed unit fails with <code>UnitExists</code>. <code>ResetFailedUnit</code> clears the residual failure state so the new transient unit can be started.</p></details>
+    </li>
+    <li>Why does <code>cloud-sql-tracker</code> communicate with systemd via D-Bus instead of shelling out to <code>systemctl show</code>?
+      <details><summary>Answer</summary><p>D-Bus provides typed properties (like <code>MainPID: u32</code>) and explicit error variants without subprocess overhead, whereas <code>systemctl show</code> requires string parsing, spawns processes, and returns exit code 0 even when a unit does not exist.</p></details>
+    </li>
+    <li>What happens to running proxy units when the host machine is rebooted or experiences a sudden power loss?
+      <details><summary>Answer</summary><p>Because transient units reside in memory on <code>tmpfs</code> and have <code>Restart=no</code> with no persisted state files, all units disappear on reboot and no proxies start automatically; every connection starts cleanly in state <code>stopped</code>.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/research/supervisor-io.md">docs/research/supervisor-io.md</a> and the <a href="https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html">systemd D-Bus API specification</a> — authoritative documentation for the manager interface, property types, and transient unit semantics.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="06-reconcile.html">&larr; Reconcile: the pure heart</a>
+  <a href="../index.html">Contents</a>
+  <a href="08-smaller-adapters.html">Three smaller adapters &rarr;</a>
+</nav>
+
+</body>
+</html>

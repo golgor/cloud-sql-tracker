@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>06. Reconcile: the pure heart — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part II &rsaquo; Chapter 06</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 06 &middot; Part II</p>
+  <h1>Reconcile: the pure heart</h1>
+  <p class="lede">One observation in, one Health state out. No I/O, no clock reads, and no hidden state — the pure decision engine that evaluates machine truth for every database connection.</p>
+</header>
+
+<h2>The mental model: read-only classification</h2>
+
+<p>Most service managers couple decision-making with side effects. A background daemon polls a process, decides it looks unhealthy, issues a kill signal, writes a timestamp to a state file on disk, and restarts the child. When state and effects intertwine, testing requires complex mocks, timing races multiply, and unexpected crashes leave stale state files that poison subsequent boots.</p>
+
+<p><code>cloud-sql-tracker</code> avoids this entirely. At the core of the system is <a href="../reference/glossary.html#reconcile">Reconcile</a>: a pure mathematical function that maps machine observations to a <a href="../reference/glossary.html#health-state">Health state</a> and status row fields.</p>
+
+<div class="diagram">  config identity  +  Unit snapshot  +  port probe  +  listener PID  +  clock
+          │                  │                 │                │          │
+          └──────────────────┴────────┬────────┴────────────────┴──────────┘
+                                      ▼
+                                reconcile()     ← pure: same inputs ⇒ same output
+                                      ▼
+                             StatusRow fields
+           (HealthState, Source, pid, port_open, uptime_sec, error)</div>
+
+<p>Reconcile is strictly <strong>read-only classification</strong>. It is not an active controller loop. It does not spawn processes, kill processes, read files, or query the Linux kernel. Callers gather the raw signals from the operating system, package them into an <code>Observation</code> struct, and pass them into <code>reconcile()</code> alongside a timestamp.</p>
+
+<div class="pure">
+  <span class="label">Pure Core vs. I/O Shell</span>
+  <p>In accordance with <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/adr/0003-local-health-signals.md">ADR 0003</a>, health in v1 is strictly local: our managed systemd unit state plus local TCP socket acceptance. Reconcile evaluates this local reality deterministically. Given identical inputs, it will always return the exact same output.</p>
+</div>
+
+<h2>The observation inputs</h2>
+
+<p>To classify the health of a <a href="../reference/glossary.html#connection">Connection</a>, Reconcile needs to know what systemd sees and what the local network stack sees. These facts are captured in two sub-structures in <code>src/reconcile.rs</code>:</p>
+
+<pre><code>/// One Connection's observed signals at one instant
+/// (`docs/reconcile.v1.md`, "Observation inputs"). `commands` builds this
+/// from `supervisor::show` + `port::observe`; Reconcile only classifies it.
+#[derive(Debug, Clone)]
+pub(crate) struct Observation {
+    pub(crate) unit: UnitObservation,
+    pub(crate) port: PortObservation,
+}
+
+/// What we know about a Connection's systemd `--user` Unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnitObservation {
+    pub(crate) state: UnitState,
+    /// Main proxy PID if the Unit currently has a live process.
+    pub(crate) main_pid: Option<u32>,
+    /// When the current start attempt began (systemd's
+    /// `ExecMainStartTimestamp` or equivalent). `None` when the Unit is
+    /// [`UnitState::Idle`] or has no known start attempt yet.
+    pub(crate) started_at: Option<SystemTime>,
+}
+
+/// A Unit's `ActiveState`, simplified to what Reconcile's truth table
+/// distinguishes (`docs/reconcile.v1.md`, "Truth table").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnitState {
+    /// Not loaded (including "unit not found"), or loaded and
+    /// `inactive`/`dead`. Not failed.
+    Idle,
+    Activating,
+    Active,
+    Deactivating,
+    /// `ActiveState=failed`. See `docs/reconcile.v1.md`,
+    /// "Clean stop vs failed unit".
+    Failed(FailureSignal),
+}</code></pre>
+<p class="src">src/reconcile.rs:33–68</p>
+
+<div class="note">
+  <span class="label">Vocabulary: Systemd Unit</span>
+  <p>A <strong>systemd unit</strong> is a Linux service unit managed by the systemd initialization and service manager; in this project, proxies run as transient units under the user's desktop login session (<code>systemd --user</code>).</p>
+</div>
+
+<p>Two critical architectural invariants are visible in these structures:</p>
+<ul>
+  <li><strong>Explicit clock injection:</strong> <code>reconcile()</code> accepts <code>now: SystemTime</code> as an explicit parameter. It never calls <code>SystemTime::now()</code> internally. This allows test suites to freeze time or jump across boundaries without altering system clocks or sleeping.</li>
+  <li><strong>Ignored <code>enabled</code> flag:</strong> While <code>Connection.enabled</code> is copied to the final <code>StatusRow</code>, it is never passed into the classification logic. Health reflects physical machine reality. A disabled connection whose proxy process is running will honestly report <a href="../reference/glossary.html#health-state"><code>HealthState::Running</code></a>. The <code>enabled</code> field gates user start policy, not truthfulness of status.</li>
+</ul>
+
+<h2>The dispatcher: from <code>reconcile()</code> to <code>classify()</code></h2>
+
+<p>The public entry point for the module is <code>reconcile()</code>. It delegates to an internal <code>classify()</code> function that matches on the simplified <code>UnitState</code> enum:</p>
+
+<pre><code>/// Classify one Connection's Health state from a single observation.
+///
+/// Pure: the same `identity`, `observation`, and `now` always produce the
+/// same [`StatusRow`] fields (`docs/reconcile.v1.md`, "Mental model").
+pub(crate) fn reconcile(
+    identity: &amp;Connection,
+    observation: &amp;Observation,
+    now: SystemTime,
+) -> StatusRow {
+    let port_open = port_is_open(observation.port.probe);
+    let classification = classify(
+        &amp;observation.unit,
+        port_open,
+        &amp;observation.port,
+        now,
+        identity.port,
+    );
+
+    StatusRow {
+        id: identity.id.clone(),
+        name: identity.name.clone(),
+        group: identity.group.clone(),
+        instance: identity.instance.clone(),
+        address: identity.address.clone(),
+        port: identity.port,
+        private_ip: identity.private_ip,
+        enabled: identity.enabled,
+        state: classification.state,
+        source: classification.source,
+        pid: classification.pid,
+        unit: model::unit_name(&amp;identity.id).ok(),
+        port_open,
+        uptime_sec: classification.uptime_sec,
+        error: classification.error,
+    }
+}</code></pre>
+<p class="src">src/reconcile.rs:102–137</p>
+
+<p><code>classify()</code> cleanly separates computing the core trio (<code>HealthState</code>, <code>Source</code>, <code>Option&lt;StatusError&gt;</code>) from attributing process details like <code>pid</code> and <code>uptime_sec</code>:</p>
+
+<pre><code>fn classify(
+    unit: &amp;UnitObservation,
+    port_open: bool,
+    port: &amp;PortObservation,
+    now: SystemTime,
+    port_number: u16,
+) -> Classification {
+    let outcome = match unit.state {
+        UnitState::Idle => classify_inactive(port_open, port, port_number),
+        UnitState::Activating => classify_activating(unit, port_open, port, now, port_number),
+        UnitState::Active => classify_active(unit, port_open, port, now, port_number),
+        UnitState::Deactivating => classify_deactivating(unit, port_open),
+        UnitState::Failed(signal) => classify_failed(signal, unit, port_open),
+    };
+
+    // `pid`/`uptime_sec` are only reported for a process we attribute to our
+    // Unit (`docs/reconcile.v1.md`, "Outputs (Status row)": "when known and
+    // relevant").
+    let pid = if outcome.source == Source::Unit {
+        unit.main_pid
+    } else {
+        None
+    };
+    let uptime_sec = if outcome.source == Source::Unit {
+        uptime_since(unit.started_at, now)
+    } else {
+        None
+    };
+
+    Classification {
+        state: outcome.state,
+        source: outcome.source,
+        pid,
+        uptime_sec,
+        error: outcome.error,
+    }
+}</code></pre>
+<p class="src">src/reconcile.rs:148–188</p>
+
+<h2>The normative truth table</h2>
+
+<p>The core behavior of <code>cloud-sql-tracker</code> is governed by the normative truth table defined in <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/reconcile.v1.md">docs/reconcile.v1.md</a>. Every row represents a distinct, unambiguous combination of machine signals.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Unit state</th>
+      <th>Port open</th>
+      <th>Process / Listener signal</th>
+      <th>Start window</th>
+      <th>State</th>
+      <th>Source</th>
+      <th>Error code</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Idle</code> (none/dead)</td>
+      <td>No</td>
+      <td>None</td>
+      <td>—</td>
+      <td><code>Stopped</code></td>
+      <td><code>None</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Idle</code> (none/dead)</td>
+      <td>Yes</td>
+      <td>Any holder (known or unknown)</td>
+      <td>—</td>
+      <td><code>Error</code></td>
+      <td><code>None</code></td>
+      <td><code>port_in_use</code></td>
+    </tr>
+    <tr>
+      <td><code>Activating</code></td>
+      <td>No</td>
+      <td>—</td>
+      <td>Yes (age &le; 10s)</td>
+      <td><code>Starting</code></td>
+      <td><code>Unit</code> or <code>None</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Activating</code></td>
+      <td>No</td>
+      <td>—</td>
+      <td>No (past 10s)</td>
+      <td><code>Error</code></td>
+      <td><code>Unit</code></td>
+      <td><code>start_timeout</code></td>
+    </tr>
+    <tr>
+      <td><code>Activating</code></td>
+      <td>Yes</td>
+      <td>Matches MainPID or unknown</td>
+      <td>—</td>
+      <td><code>Running</code></td>
+      <td><code>Unit</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Active</code></td>
+      <td>Yes</td>
+      <td>Matches MainPID or unknown</td>
+      <td>—</td>
+      <td><code>Running</code></td>
+      <td><code>Unit</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Active</code></td>
+      <td>Yes</td>
+      <td>Listener PID &ne; MainPID</td>
+      <td>—</td>
+      <td><code>Error</code></td>
+      <td><code>Unit</code></td>
+      <td><code>port_in_use</code></td>
+    </tr>
+    <tr>
+      <td><code>Active</code></td>
+      <td>No</td>
+      <td>—</td>
+      <td>Yes (age &le; 10s)</td>
+      <td><code>Starting</code></td>
+      <td><code>Unit</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Active</code></td>
+      <td>No</td>
+      <td>—</td>
+      <td>No (past 10s)</td>
+      <td><code>Error</code></td>
+      <td><code>Unit</code></td>
+      <td><code>unit_failed</code></td>
+    </tr>
+    <tr>
+      <td><code>Deactivating</code></td>
+      <td>Yes</td>
+      <td>—</td>
+      <td>—</td>
+      <td><code>Running</code></td>
+      <td><code>Unit</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Deactivating</code></td>
+      <td>No</td>
+      <td>—</td>
+      <td>—</td>
+      <td><code>Stopped</code></td>
+      <td><code>Unit</code> or <code>None</code></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>Failed</code> (crash/OOM)</td>
+      <td>*</td>
+      <td>—</td>
+      <td>—</td>
+      <td><code>Error</code></td>
+      <td><code>Unit</code> or <code>None</code></td>
+      <td><code>unit_failed</code> / <code>exec_failed</code></td>
+    </tr>
+    <tr>
+      <td><code>Failed</code> (clean stop)</td>
+      <td>No</td>
+      <td>No live process</td>
+      <td>—</td>
+      <td><code>Stopped</code></td>
+      <td><code>None</code></td>
+      <td>—</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>The start window and two independent clocks</h2>
+
+<p>How can a stateless CLI tell whether a service with a closed port is legitimately starting up or permanently stuck, without maintaining a persistent state file on disk?</p>
+
+<p>The answer is <code>START_WINDOW</code>. When systemd launches a unit, it records a monotonic start timestamp (<code>ExecMainStartTimestamp</code>). By comparing this timestamp against the observation time <code>now</code>, Reconcile can determine how long the unit has been attempting to start:</p>
+
+<pre><code>/// The start window (`docs/reconcile.v1.md`, "Start window"): a Connection
+/// stays `starting` for at most this long after a start attempt before
+/// Reconcile calls it `start_timeout` / `unit_failed` instead. Same numeric
+/// default as the CLI's `--wait-ms` (`docs/cli-contract.v1.md`), but that
+/// flag only bounds how long a command *blocks*; this constant is what
+/// Reconcile itself uses on every call, including plain `status`.
+pub(crate) const START_WINDOW: Duration = Duration::from_millis(10_000);
+
+fn within_start_window(started_at: Option<SystemTime>, now: SystemTime) -> bool {
+    match started_at {
+        None => false,
+        Some(t) => age_since(t, now) &lt;= START_WINDOW,
+    }
+}</code></pre>
+<p class="src">src/reconcile.rs:25–29, 431–436</p>
+
+<div class="trap">
+  <span class="label">Trap: Two Independent Clocks</span>
+  <p>Do not confuse Reconcile's <code>START_WINDOW</code> with the CLI flag <code>--wait-ms</code>:</p>
+  <ul>
+    <li><strong><code>START_WINDOW</code> (10s):</strong> A pure classification window used by <code>reconcile()</code> on every single status observation to decide whether a closed port is <code>Starting</code> vs <code>Error</code> (<code>start_timeout</code> / <code>unit_failed</code>).</li>
+    <li><strong><code>--wait-ms</code> (default 10s):</strong> An I/O loop budget in the CLI <code>start</code> and <code>restart</code> commands that controls how long the command blocks polling until status reaches <code>Running</code>.</li>
+  </ul>
+  <p>The mutation loop must <strong>never</strong> abort early just because a single intermediate poll returned Reconcile's <code>start_timeout</code>. As long as time remains on the caller's <code>--wait-ms</code> budget, the loop continues polling.</p>
+</div>
+
+<p>Notice also the handling of missing timestamps: if <code>started_at</code> is <code>None</code>, <code>within_start_window</code> returns <code>false</code>. An undated connection is never assumed to be "just started," preventing stuck units from being trapped in eternal <code>Starting</code> status.</p>
+
+<h2>Clean stops vs. real failures</h2>
+
+<p>When an operator stops a service, systemd sends a <code>SIGTERM</code>. Depending on how the process exits and whether systemd's <code>reset-failed</code> has run, systemd may classify the unit as <code>ActiveState=failed</code>. If a control plane treated every <code>ActiveState=failed</code> as an error, a cleanly stopped proxy would appear broken to the user.</p>
+
+<p>To prevent this, <code>cloud-sql-tracker</code> configures all proxy units with the flag <code>--exit-zero-on-sigterm</code>. When stopped gracefully, the proxy exits with code <code>0</code>. Reconcile then inspects the failure signal and recognizes three distinct <strong>clean stop branches</strong>:</p>
+
+<pre><code>/// Whether a failed Unit's raw signal matches a clean stop, an exec
+/// failure, or a crash (`docs/reconcile.v1.md`, "Clean stop vs failed
+/// unit"). `ExecMainCode` (exited vs killed) is not modeled: the doc calls
+/// the `Result`/`ExecMainStatus` pairs below "sufficient when in doubt".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    /// Never reached a steady running process.
+    ExecFailed,
+    /// Crash, unexpected nonzero exit, SIGKILL, stop-timeout, or OOM.
+    Crashed,
+    /// Branch A, B, or C of "Clean stop vs failed unit".
+    CleanStop,
+}
+
+fn classify_failure_signal(signal: FailureSignal) -> FailureKind {
+    use UnitResult::*;
+
+    match (signal.result, signal.exec_main_status) {
+        // Branch A: proxy honored --exit-zero-on-sigterm.
+        (Success, _) => FailureKind::CleanStop,
+        (ExitCode, 0) => FailureKind::CleanStop,
+        // Branch B: killed by the default KillSignal (SIGTERM = 15).
+        (Signal, 15) => FailureKind::CleanStop,
+        // Branch C: exited 143 (128 + SIGTERM) after SIGTERM.
+        (ExitCode, 143) => FailureKind::CleanStop,
+        (ExecCondition, _) => FailureKind::ExecFailed,
+        // SIGKILL (9), stop timeout, OOM/core-dump, or any other nonzero
+        // exit / signal: a real crash, not a clean stop.
+        (Signal, _) | (Timeout, _) | (CoreDump, _) | (ExitCode, _) => FailureKind::Crashed,
+    }
+}</code></pre>
+<p class="src">src/reconcile.rs:367–391</p>
+
+<div class="why">
+  <span class="label">Why SIGKILL is Never Clean</span>
+  <p>Notice that <code>SIGKILL</code> (signal 9) is strictly categorized under <code>FailureKind::Crashed</code>. A clean stop uses <code>SIGTERM</code>. Receiving <code>SIGKILL</code> indicates that the process failed to shut down before systemd's stop timeout expired, or that an external administrator manually killed the process with <code>kill -9</code>.</p>
+</div>
+
+<p>If a unit has <code>FailureKind::CleanStop</code>, the port is closed, and no live PID remains, <code>classify_failed</code> returns <a href="../reference/glossary.html#health-state"><code>HealthState::Stopped</code></a> with no error attached:</p>
+
+<pre><code>fn classify_failed(signal: FailureSignal, unit: &amp;UnitObservation, port_open: bool) -> Outcome {
+    let kind = classify_failure_signal(signal);
+
+    if kind == FailureKind::CleanStop &amp;&amp; !port_open &amp;&amp; unit.main_pid.is_none() {
+        // Our own `--exit-zero-on-sigterm` stop pattern, port closed, no
+        // live process left: a clean stop, not a failure.
+        return Outcome {
+            state: HealthState::Stopped,
+            source: Source::None,
+            error: None,
+        };
+    }
+    // ...
+}</code></pre>
+<p class="src">src/reconcile.rs:327–338</p>
+
+<h2>Foreign processes, listener matching, and unreachable probes</h2>
+
+<p>Reconcile enforces strict rules around network sockets and process ownership.</p>
+
+<h3>PID attribution and foreign processes</h3>
+<p>When a port is open, Reconcile compares the socket's listener PID with the systemd unit's <code>MainPID</code>:</p>
+
+<pre><code>/// `docs/reconcile.v1.md`, "PID attribution": an observed port holder is
+/// consistent with our Unit owning the port when no other holder is known,
+/// or the known holder is our Unit's `MainPID`.
+fn listener_matches_unit(main_pid: Option&lt;u32&gt;, listener_pid: Option&lt;u32&gt;) -> bool {
+    match listener_pid {
+        None => true,
+        Some(pid) => Some(pid) == main_pid,
+    }
+}</code></pre>
+<p class="src">src/reconcile.rs:409–414</p>
+
+<p>If another process (such as a local Docker container or an orphaned proxy started outside of systemd) holds the port, Reconcile immediately returns <code>HealthState::Error</code> with error code <code>port_in_use</code>. In accordance with ADR 0003, v1 does <strong>not</strong> adopt orphan processes. An unmanaged proxy on our port is a foreign collision that the operator must resolve.</p>
+
+<h3>Unreachable port probes</h3>
+<p>When probing TCP ports, connection attempts can occasionally time out or be rejected. Reconcile maps probe results conservatively:</p>
+
+<pre><code>/// `docs/reconcile.v1.md`, "`port_open` mapping": only an `Open` probe
+/// counts. `Unreachable` (timeout / filtered) is treated the same as
+/// `Closed` — rare on loopback, and v1 does not add a third Health path
+/// for it.
+fn port_is_open(probe: PortProbe) -> bool {
+    matches!(probe, PortProbe::Open)
+}</code></pre>
+<p class="src">src/reconcile.rs:420–422</p>
+
+<p>On loopback (<code>127.0.0.1</code>), unreachable probes are rare. Mapping <code>Unreachable</code> to <code>false</code> ensures that transient network hiccups are treated as closed rather than falsely reporting that a healthy service is listening.</p>
+
+<h2>Pinned invariants in unit tests</h2>
+
+<p>Because <code>src/reconcile.rs</code> is pure and decoupled from system I/O, its test suite can exercise complex edge cases in microseconds without spawning processes or setting up mock frameworks. Let us examine two actual test cases from the module:</p>
+
+<h3>1. Detecting port conflicts on active units</h3>
+<p>What happens if our systemd unit is active (PID 111), but another process (PID 222, <code>docker-proxy</code>) binds to the port first?</p>
+
+<pre><code>#[test]
+fn active_with_open_port_and_mismatched_listener_is_a_port_conflict() {
+    let unit = unit_with(UnitState::Active, Some(111), Some(now()));
+    let port = port_with(PortProbe::Open, Some(222), Some("docker-proxy"));
+    let row = reconcile(&amp;connection("fe-dev", 15432), &amp;observe(unit, port), now());
+    assert_eq!(row.state, HealthState::Error);
+    assert_eq!(row.source, Source::Unit);
+    // Source stays Unit even though the port belongs to someone else —
+    // unlike the idle-unit case, our Unit is genuinely active.
+    assert_eq!(row.pid, Some(111));
+    assert_eq!(row.error.unwrap().code, ErrorCode::PortInUse);
+}</code></pre>
+<p class="src">src/reconcile.rs:757–768</p>
+
+<p>This test pins a critical invariant: even though our unit is active, Reconcile refuses to report <code>Running</code> because our process does not own the port. Notice that <code>source</code> correctly remains <code>Source::Unit</code> because our unit process is alive, while the error code clearly flags <code>PortInUse</code>.</p>
+
+<h3>2. Recognizing clean stops under failed unit states</h3>
+<p>What happens if systemd leaves a unit in <code>ActiveState=failed</code> after a normal shutdown?</p>
+
+<pre><code>#[test]
+fn failed_unit_with_a_clean_stop_signal_and_no_process_is_stopped() {
+    let signal = FailureSignal {
+        result: UnitResult::Success,
+        exec_main_status: 0,
+    };
+    let unit = unit_with(UnitState::Failed(signal), None, None);
+    let row = reconcile(
+        &amp;connection("fe-dev", 15432),
+        &amp;observe(unit, closed_port()),
+        now(),
+    );
+    assert_eq!(row.state, HealthState::Stopped);
+    assert_eq!(row.source, Source::None);
+    assert_eq!(row.error, None);
+}</code></pre>
+<p class="src">src/reconcile.rs:934–946</p>
+
+<p>This test proves that a clean exit code (<code>0</code>) with <code>UnitResult::Success</code>, no remaining PID, and a closed port evaluates to <code>HealthState::Stopped</code> with no error, cleanly shielding the operator from systemd's internal state artifacts.</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>within_start_window</code> treat a <code>None</code> start timestamp as outside the start window rather than assuming the service just started?
+      <details><summary>Answer</summary><p>Treating a missing timestamp as inside the start window would cause an undated or stuck connection to report <code>Starting</code> forever. Defaulting to outside the window ensures it promptly fails with a timeout or unit failure.</p></details>
+    </li>
+    <li>How do Reconcile's <code>START_WINDOW</code> and the CLI's <code>--wait-ms</code> differ in their responsibilities, and why are they independent clocks?
+      <details><summary>Answer</summary><p><code>START_WINDOW</code> (10s) is a pure classification rule deciding whether an observed closed port is still in its startup grace period. <code>--wait-ms</code> is an I/O polling budget controlling how long the CLI command blocks waiting for <code>Running</code>.</p></details>
+    </li>
+    <li>Why are there three separate clean-stop branches in <code>classify_failure_signal</code>, and why is SIGKILL (signal 9) excluded from all of them?
+      <details><summary>Answer</summary><p>Systemd and proxies report SIGTERM stops differently depending on flags and signal trapping (exit code 0, raw signal 15, or exit code 143). SIGKILL is excluded because it indicates an ungraceful kill or stop-timeout, which represents an abnormal termination.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/reconcile.v1.md">docs/reconcile.v1.md</a> and <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/src/reconcile.rs">src/reconcile.rs</a> — the authoritative specification and pure implementation of Health state reconciliation.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="05-model-and-config.html">&larr; The model and the config</a>
+  <a href="../index.html">Contents</a>
+  <a href="07-supervisor.html">Talking to systemd &rarr;</a>
+</nav>
+
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12. Shipping it — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part V &rsaquo; Chapter 12</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 12 &middot; Part V</p>
+  <h1>Shipping it</h1>
+  <p class="lede">From source code to a hardened release binary on the operator's PATH: toolchain pinning, release profile optimization, automated GitHub Releases, and operational shutdown semantics.</p>
+</header>
+
+<h2>The journey to production</h2>
+
+<p>Building a correct Rust program is only half the engineering challenge; shipping it predictably to an operator's workstation is the other half. In <strong>cloud-sql-tracker</strong>, shipping encompasses four tightly coordinated concerns:</p>
+
+<ol>
+  <li><strong>Toolchain reproducibility:</strong> Ensuring developer machines and CI runners execute identical compiler versions and lint rules.</li>
+  <li><strong>Binary optimization:</strong> Tuning compiler profile flags to minimize binary size while preserving execution speed and error diagnostics.</li>
+  <li><strong>Automated release artifacts:</strong> Packaging versioned archives and cryptographic checksums on Git tag pushes without manual intervention.</li>
+  <li><strong>Operational lifecycle:</strong> Defining how the compiled binary behaves when the host operating system restarts, logs out, or loses power.</li>
+</ol>
+
+<h2>1. The "one number in three files" rule</h2>
+
+<p>To eliminate discrepancies between local development and CI pipelines, the Rust toolchain version is locked to a single exact version—<strong>1.97.1</strong>—across three configuration files simultaneously:</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│ 1. mise.toml (Local Developer Toolchain Manager)       │
+│    [tools] rust = { version = "1.97.1", ... }          │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 2. Cargo.toml (Minimum Supported Rust Version - MSRV)  │
+│    [package] rust-version = "1.97.1"                   │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 3. .github/workflows/ci.yml & release.yml (GitHub CI)  │
+│    env: RUST_VERSION: "1.97.1"                         │
+└────────────────────────────────────────────────────────┘</div>
+
+<p>If a developer upgrades their local compiler, <code>mise</code> ensures they continue compiling with <code>1.97.1</code>. If someone introduces a Rust feature from version <code>1.98.0</code>, Cargo fails during <code>cargo check</code>. When the project decides to bump its compiler version, all three files are updated in a single commit.</p>
+
+<h2>2. Local task automation with mise</h2>
+
+<p>The project uses <a href="https://mise.jdx.dev/">mise</a> as a thin task runner. Rather than inventing proprietary build abstractions, every mise task is a transparent wrapper around standard Cargo commands:</p>
+
+<pre><code>[tasks.fmt]
+description = "Format Rust sources"
+run = "cargo fmt"
+
+[tasks.lint]
+description = "Clippy with warnings denied"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Default cargo test (never --include-ignored)"
+run = "cargo test"
+
+[tasks.check]
+description = "Full local gate (matches CI)"
+run = [
+  "mise run fmt-check",
+  "mise run lint",
+  "mise run test",
+  "mise run contracts",
+]</code></pre>
+<p class="src">mise.toml:15–42</p>
+
+<h3>Symlinking for active dogfooding</h3>
+
+<p>During active development, running <code>cargo install --path .</code> compiles the binary and copies it into <code>~/.cargo/bin/</code>. However, this creates friction: after making a code change, the developer must remember to reinstall the binary, or risk testing a stale version.</p>
+
+<p>The project solves this with the <code>install-local</code> task, which compiles an optimized release build and establishes a symbolic link in <code>~/.local/bin/</code> directly pointing to the target build artifact:</p>
+
+<pre><code># Symlink keeps PATH pointed at this worktree's target/release binary after each rebuild.
+[tasks.install-local]
+description = "Build release and symlink into ~/.local/bin for PATH dogfood"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run build-release
+mkdir -p "${HOME}/.local/bin"
+ln -sfn "${PWD}/target/release/cloud-sql-tracker" "${HOME}/.local/bin/cloud-sql-tracker"
+echo "linked ${HOME}/.local/bin/cloud-sql-tracker -> ${PWD}/target/release/cloud-sql-tracker"
+"${HOME}/.local/bin/cloud-sql-tracker" --version
+"""</code></pre>
+<p class="src">mise.toml:47–60</p>
+
+<div class="why">
+  <span class="label">Why</span>
+  <p><strong>Immediate iteration:</strong> With a symlink in place, running <code>mise run build-release</code> immediately updates the binary invoked by the shell and the desktop status bar plugin without touching file locations or permissions.</p>
+</div>
+
+<h2>3. Release profile &amp; binary size economics</h2>
+
+<p>Because the CLI is invoked every 1–2 seconds by the Omarchy status bar, binary size and execution speed matter. Research conducted in <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/research/release-build.md">docs/research/release-build.md</a> measured various release profile configurations on an <code>x86_64</code> Linux workstation:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Profile Configuration</th>
+      <th>Binary Size</th>
+      <th>Delta vs Baseline</th>
+      <th>Architectural Decision</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Baseline (LTO + 1 Codegen Unit + Strip)</strong></td>
+      <td><strong>2,711,184 B (2.59 MiB)</strong></td>
+      <td><strong>0%</strong></td>
+      <td><strong>PICK (Optimal balance of size &amp; speed)</strong></td>
+    </tr>
+    <tr>
+      <td><code>opt-level = "z"</code> (Optimize for size)</td>
+      <td>1,885,584 B (1.80 MiB)</td>
+      <td>-30.5%</td>
+      <td>Discarded (Sacrifices execution speed)</td>
+    </tr>
+    <tr>
+      <td><code>panic = "abort"</code> (Remove unwinding)</td>
+      <td>2,302,736 B (2.20 MiB)</td>
+      <td>-15.1%</td>
+      <td>Discarded (Weakens panic diagnostics)</td>
+    </tr>
+    <tr>
+      <td><code>lto = "thin"</code> (Thin LTO)</td>
+      <td>2,968,632 B (2.83 MiB)</td>
+      <td>+9.5%</td>
+      <td>Discarded (Larger binary than fat LTO)</td>
+    </tr>
+    <tr>
+      <td><code>strip = false</code> (Keep debug info)</td>
+      <td>5,568,944 B (5.31 MiB)</td>
+      <td>+105.0%</td>
+      <td>Discarded (Debuginfo unnecessary in release)</td>
+    </tr>
+    <tr>
+      <td>Default Release (No LTO, 16 Codegen Units)</td>
+      <td>3,851,904 B (3.67 MiB)</td>
+      <td>+42.1%</td>
+      <td>Discarded (Misses dead-code elimination)</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The project pinned the following release profile in <code>Cargo.toml</code>:</p>
+
+<pre><code>[profile.release]
+lto = true
+codegen-units = 1
+strip = true</code></pre>
+<p class="src">Cargo.toml:32–35</p>
+
+<p>Here is what each knob accomplishes:</p>
+
+<ul>
+  <li><strong><code>lto = true</code> (Fat Link-Time Optimization):</strong> LLVM performs cross-crate dead-code elimination and aggressive inlining across the entire dependency graph at link time.</li>
+  <li><strong><code>codegen-units = 1</code>:</strong> Forces LLVM to process the crate as a single unit rather than splitting it across 16 parallel threads, maximizing global optimization opportunities.</li>
+  <li><strong><code>strip = true</code>:</strong> Automatically strips symbol tables and debug symbols during compilation, eliminating the need for a separate <code>strip(1)</code> step.</li>
+</ul>
+
+<div class="note">
+  <span class="label">UPX Packing Discarded</span>
+  <p>Packing executables with UPX was explicitly rejected. For a security-sensitive binary managing database credentials and systemd services, runtime decompression hurts transparency, triggers antivirus heuristics, and adds startup overhead.</p>
+</div>
+
+<h2>4. Automated GitHub Releases</h2>
+
+<p>The release workflow in <code>.github/workflows/release.yml</code> executes whenever a Git tag matching <code>v*</code> (such as <code>v0.1.1</code>) is pushed:</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│ Push Git Tag: v0.1.1                                  │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 1. Validate Tag Matches Cargo.toml version (0.1.1)     │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 2. Gate: cargo test --locked                           │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 3. Build: cargo build --release --locked               │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 4. Package: cloud-sql-tracker-v0.1.1-x86_64-....tar.gz │
+│    - Contains: cloud-sql-tracker, LICENSE, README.md   │
+│    - Generates: SHA256SUMS                             │
+└───────────────────────────┬────────────────────────────┘
+                            │
+┌───────────────────────────▼────────────────────────────┐
+│ 5. Publish via gh release create / upload              │
+└────────────────────────────────────────────────────────┘</div>
+
+<h3>The single version source &amp; lockfile trap</h3>
+
+<p>The version number is declared in exactly one place: <code>Cargo.toml</code> under <code>[package].version</code>. The CLI binary reads this at compile time via <code>env!("CARGO_PKG_VERSION")</code>. There is no second hardcoded constant in <code>main.rs</code>.</p>
+
+<div class="trap">
+  <span class="label">Lesson learned</span>
+  <p><strong>Always update Cargo.lock with version bumps:</strong> During the release of <code>v0.1.1</code> (<a href="https://github.com/golgor/cloud-sql-tracker/issues/79">Issue #79</a>), <code>Cargo.toml</code> was bumped from <code>0.1.0</code> to <code>0.1.1</code>, but <code>Cargo.lock</code> was not regenerated in the same commit. When the CI release workflow ran <code>cargo test --locked</code>, Cargo detected that <code>Cargo.lock</code> was out of date and failed the build <em>after the tag was already pushed</em>.</p>
+</div>
+
+<h2>5. Operational shutdown &amp; restart behavior</h2>
+
+<p>What happens when the developer's computer shuts down, reboots, or crashes? The system behavior is governed by systemd transient unit semantics and <a href="../reference/glossary.html#adr">ADR 0001</a>:</p>
+
+<pre><code>let properties: Vec<(&str, Value<'_>)> = vec![
+    (
+        "Description",
+        Value::new(format!("Cloud SQL Auth Proxy ({})", connection.id)),
+    ),
+    ("Type", Value::new("exec")),
+    ("KillMode", Value::new("control-group")),
+    ("TimeoutStopUSec", Value::new(TIMEOUT_STOP_USEC)),
+    ("Restart", Value::new("no")),
+    ("Environment", Value::new(environment)),
+    ("ExecStart", Value::new(exec_start)),
+];</code></pre>
+<p class="src">src/supervisor.rs:347–358</p>
+
+<h3>Graceful shutdown vs hard power cut</h3>
+
+<table>
+  <thead>
+    <tr>
+      <th>Event</th>
+      <th>System Action</th>
+      <th>Proxy Exit Code</th>
+      <th>Reconcile Interpretation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Graceful Logout / Reboot</strong></td>
+      <td>systemd sends <code>SIGTERM</code> to the proxy's control group</td>
+      <td>Exits <code>0</code> (due to <code>--exit-zero-on-sigterm</code>)</td>
+      <td>Clean stop &rarr; <a href="../reference/glossary.html#health-state">HealthState::Stopped</a></td>
+    </tr>
+    <tr>
+      <td><strong>Proxy Crash / Panic</strong></td>
+      <td>Process terminates abnormally</td>
+      <td>Non-zero exit code / Signal</td>
+      <td>Unit failed &rarr; <a href="../reference/glossary.html#health-state">HealthState::Error</a></td>
+    </tr>
+    <tr>
+      <td><strong>Hard Power Loss</strong></td>
+      <td>Kernel halts immediately; no signal sent</td>
+      <td>N/A</td>
+      <td>Memory cleared on reboot</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Why proxies never autostart on reboot</h3>
+
+<p>Three independent architectural properties guarantee that proxies <strong>never automatically restart after a reboot</strong>:</p>
+
+<ol>
+  <li><strong>Transient Units:</strong> Units exist only in <code>/run/user/&lt;uid&gt;/systemd/transient/</code> on a <code>tmpfs</code> RAM filesystem, which is wiped entirely on reboot. No static unit files are written to <code>~/.config/systemd/user/</code>.</li>
+  <li><strong><code>Restart=no</code>:</strong> Systemd is explicitly instructed never to restart an exited proxy unit.</li>
+  <li><strong>Statelessness (ADR 0001):</strong> The control plane maintains no database or desired-state file. When the system boots, all configured connections are cleanly reported as <code>stopped</code> until the operator or bar widget explicitly requests a start.</li>
+</ol>
+
+<div class="pure">
+  <span class="label">Payoff</span>
+  <p><strong>Zero stale state:</strong> Because there are no PID files or state databases, an unexpected power outage leaves behind zero corrupt state. The next boot starts with a completely clean slate.</p>
+</div>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does cloud-sql-tracker enforce the same Rust toolchain version across <code>mise.toml</code>, <code>Cargo.toml</code>, and GitHub Actions?
+      <details><summary>Answer</summary><p>Locking the toolchain to one exact version eliminates discrepancies in compiler optimizations, Clippy lint behavior, and formatting rules between developer machines and CI runners.</p></details>
+    </li>
+    <li>Why was UPX executable compression rejected for the release binary despite reducing file size?
+      <details><summary>Answer</summary><p>UPX compression obscures binary contents, triggers security heuristics in antivirus software, and introduces runtime decompression overhead for a tool that runs frequently.</p></details>
+    </li>
+    <li>Why do supervised proxy processes never automatically restart when the computer boots up?
+      <details><summary>Answer</summary><p>Proxy services are created as transient units stored only in temporary memory with <code>Restart=no</code>, and the control plane maintains no persistent state files.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/research/release-build.md">docs/research/release-build.md</a> &middot; Empirical release profile measurements and release workflow architecture.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="11-proving-it-works.html">&larr; 11. Proving it works</a>
+  <a href="../index.html">Contents</a>
+</nav>
+
+</body>
+</html>
