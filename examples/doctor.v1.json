@@ -12,7 +12,7 @@
     {
       "id": "proxy_bin",
       "status": "pass",
-      "detail": "/usr/bin/cloud-sql-proxy",
+      "detail": "/usr/bin/cloud-sql-proxy (2.25.2+linux.amd64)",
       "hint": null
     },
     {

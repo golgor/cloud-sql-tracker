@@ -7,13 +7,28 @@
 //! `commands::doctor` (#44) calls the `*_check` rows below.
 //! `commands::start` (#43) calls `resolve_proxy_bin` / `adc_status` directly
 //! and reuses `proxy_bin_check` / `adc_check` messages for bin_missing / auth.
+//! Start only needs the resolve failure message from `proxy_bin_check`; the
+//! version probe runs only on doctor's path after a successful resolve.
 
 use std::ffi::OsStr;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use rustix::process::{kill_process_group, Pid, Signal};
 
 use crate::model::{CheckRow, CheckStatus};
 
 const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
+
+/// How long doctor waits for `cloud-sql-proxy -v` before failing the check
+/// (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+const PROXY_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Poll interval while waiting for the version child to exit.
+const PROXY_VERSION_POLL: Duration = Duration::from_millis(20);
 
 /// Resolve the `cloud-sql-proxy` binary to an absolute-or-`PATH`-checked
 /// path, for **start** (`docs/config.v1.md`, "`proxy_bin` resolution").
@@ -23,37 +38,310 @@ const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
 /// executable file; a bare name is searched on `PATH` the same way a shell
 /// would. Mutate (#43) will call this directly for **start**'s env
 /// forwarding; [`proxy_bin_check`] below already makes it reachable.
+///
+/// This function only resolves a path. It does **not** spawn the binary or
+/// check identity. Doctor's version probe lives in [`proxy_bin_check`].
 pub(crate) fn resolve_proxy_bin(configured: Option<&str>) -> Result<PathBuf, ProxyBinError> {
     let name = configured.unwrap_or(DEFAULT_PROXY_BIN);
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     resolve_bin(name, &path_env)
 }
 
-/// Doctor's `proxy_bin` row (`docs/doctor.v1.md`, "`proxy_bin` — hard"),
-/// built on [`resolve_proxy_bin`].
+/// Doctor's `proxy_bin` row (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+///
+/// Resolve first. On resolve failure, return the existing fail row (start
+/// reuses that message). On resolve success, spawn `resolved -v` with a
+/// short timeout and require cloud-sql-proxy identity output.
 pub(crate) fn proxy_bin_check(configured: Option<&str>) -> CheckRow {
-    check_row_for_proxy_bin(resolve_proxy_bin(configured))
+    match resolve_proxy_bin(configured) {
+        Err(err) => check_row_for_proxy_bin_resolve_error(err),
+        Ok(path) => check_row_for_proxy_bin_probe(&path, probe_proxy_version(&path)),
+    }
 }
 
-fn check_row_for_proxy_bin(resolved: Result<PathBuf, ProxyBinError>) -> CheckRow {
-    match resolved {
-        Ok(path) => CheckRow {
+fn check_row_for_proxy_bin_resolve_error(err: ProxyBinError) -> CheckRow {
+    CheckRow {
+        id: "proxy_bin".to_string(),
+        status: CheckStatus::Fail,
+        detail: err.to_string(),
+        hint: Some(PROXY_BIN_INSTALL_HINT.to_string()),
+    }
+}
+
+/// Assemble the doctor row after a successful path resolve, from the
+/// version-probe result. Pure so tests can feed scripted probe outcomes
+/// without spawning (`AGENTS.md`: name the pure fn).
+fn check_row_for_proxy_bin_probe(
+    path: &Path,
+    probe: Result<String, ProxyVersionError>,
+) -> CheckRow {
+    match probe {
+        Ok(version) => CheckRow {
             id: "proxy_bin".to_string(),
             status: CheckStatus::Pass,
-            detail: path.display().to_string(),
+            detail: format_proxy_bin_pass_detail(path, &version),
             hint: None,
         },
         Err(err) => CheckRow {
             id: "proxy_bin".to_string(),
             status: CheckStatus::Fail,
-            detail: err.to_string(),
-            hint: Some(
-                "Install cloud-sql-proxy, or set \"proxy_bin\" in connections.json to its \
-                 absolute path."
-                    .to_string(),
-            ),
+            detail: format_proxy_version_fail_detail(path, &err),
+            hint: Some(err.hint().to_string()),
         },
     }
+}
+
+/// Pass `detail` shape: `{path} ({version_token})`
+/// (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+fn format_proxy_bin_pass_detail(path: &Path, version: &str) -> String {
+    format!("{} ({version})", path.display())
+}
+
+fn format_proxy_version_fail_detail(path: &Path, err: &ProxyVersionError) -> String {
+    format!("{}: {err}", path.display())
+}
+
+const PROXY_BIN_INSTALL_HINT: &str = "Install cloud-sql-proxy, or set \"proxy_bin\" in \
+                                      connections.json to its absolute path.";
+
+const PROXY_BIN_IDENTITY_HINT: &str = "The resolved binary did not identify as cloud-sql-proxy. \
+                                      Install cloud-sql-proxy, or set \"proxy_bin\" in \
+                                      connections.json to the real proxy path.";
+
+const PROXY_BIN_PROBE_HINT: &str = "Could not read a version from the resolved binary. \
+                                   Install cloud-sql-proxy, or set \"proxy_bin\" in \
+                                   connections.json to a working proxy path.";
+
+/// Why the post-resolve version probe failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProxyVersionError {
+    /// `Command::spawn` failed (permissions, I/O, ...).
+    SpawnFailed { detail: String },
+    /// Child did not exit within [`PROXY_VERSION_TIMEOUT`].
+    TimedOut,
+    /// Child exited non-zero.
+    NonZeroExit { status: String },
+    /// Output was empty, wrong product, or missing a version token.
+    IdentityMismatch { detail: String },
+}
+
+impl ProxyVersionError {
+    fn hint(&self) -> &'static str {
+        match self {
+            ProxyVersionError::IdentityMismatch { .. } => PROXY_BIN_IDENTITY_HINT,
+            ProxyVersionError::SpawnFailed { .. }
+            | ProxyVersionError::TimedOut
+            | ProxyVersionError::NonZeroExit { .. } => PROXY_BIN_PROBE_HINT,
+        }
+    }
+}
+
+impl std::fmt::Display for ProxyVersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProxyVersionError::SpawnFailed { detail } => {
+                write!(f, "could not run version probe: {detail}")
+            }
+            ProxyVersionError::TimedOut => write!(
+                f,
+                "version probe timed out after {}s",
+                PROXY_VERSION_TIMEOUT.as_secs()
+            ),
+            ProxyVersionError::NonZeroExit { status } => {
+                write!(f, "version probe exited {status}")
+            }
+            ProxyVersionError::IdentityMismatch { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+/// Run `path -v` with a short timeout and parse the version token.
+///
+/// Spawn stays here (I/O). Identity rules live in
+/// [`parse_proxy_version_output`].
+fn probe_proxy_version(path: &Path) -> Result<String, ProxyVersionError> {
+    let output = run_proxy_version_command(path)?;
+    if !output.status.success() {
+        return Err(ProxyVersionError::NonZeroExit {
+            status: output.status.to_string(),
+        });
+    }
+    parse_proxy_version_output(&output.stdout, &output.stderr)
+}
+
+struct ProxyVersionOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_proxy_version_command(path: &Path) -> Result<ProxyVersionOutput, ProxyVersionError> {
+    // Own process group so a timeout can kill shell helpers (e.g. `sleep`)
+    // started by a wrapper script, not only the direct child PID.
+    let mut child = spawn_version_probe(path)?;
+
+    // Read pipes on side threads while we wait. That avoids a pipe-buffer
+    // deadlock if a bad binary writes a lot before exiting, and keeps the
+    // wait loop small.
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .expect("stdout was piped on the version probe child");
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .expect("stderr was piped on the version probe child");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + PROXY_VERSION_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    terminate_version_probe(&mut child);
+                    // Drop readers after kill so join cannot hang forever.
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(ProxyVersionError::TimedOut);
+                }
+                std::thread::sleep(PROXY_VERSION_POLL);
+            }
+            Err(err) => {
+                terminate_version_probe(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ProxyVersionError::SpawnFailed {
+                    detail: err.to_string(),
+                });
+            }
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    Ok(ProxyVersionOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Spawn `path -v` in its own process group.
+///
+/// Retries a few times on `ETXTBSY` ("Text file busy"): Linux can return
+/// that when a script was just written and is still open for write in the
+/// same process (common in unit tests that create a temp executable).
+fn spawn_version_probe(path: &Path) -> Result<Child, ProxyVersionError> {
+    const SPAWN_ATTEMPTS: usize = 10;
+    let mut last_err = None;
+    for attempt in 0..SPAWN_ATTEMPTS {
+        match Command::new(path)
+            .arg("-v")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err) if err.raw_os_error() == Some(libc_etxtbsy()) => {
+                last_err = Some(err);
+                // Brief backoff; the writer should have closed the file.
+                std::thread::sleep(Duration::from_millis(5 + attempt as u64 * 5));
+            }
+            Err(err) => {
+                return Err(ProxyVersionError::SpawnFailed {
+                    detail: err.to_string(),
+                });
+            }
+        }
+    }
+    Err(ProxyVersionError::SpawnFailed {
+        detail: last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "spawn failed after ETXTBSY retries".to_string()),
+    })
+}
+
+/// `ETXTBSY` from the host libc. Kept as a tiny helper so the spawn loop
+/// does not open-code the number.
+fn libc_etxtbsy() -> i32 {
+    // Linux ETXTBSY is 26. rustix/libc would also work; this avoids a new
+    // direct libc dependency for one constant.
+    26
+}
+
+/// Kill the version-probe process group, then reap the direct child.
+///
+/// The child was started with [`CommandExt::process_group`]`(0)`, so its
+/// PID is also the process-group id. Group kill covers helper processes
+/// a shell script may start (for example `sleep`).
+fn terminate_version_probe(child: &mut Child) {
+    if let Some(pid) = Pid::from_raw(child.id() as i32) {
+        let _ = kill_process_group(pid, Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Parse `cloud-sql-proxy -v` output into the version token.
+///
+/// Accepts the real line shape:
+/// `cloud-sql-proxy version 2.25.2+linux.amd64`
+///
+/// Looks at stdout first, then stderr, so a binary that writes the line to
+/// either stream still passes. Pure: no process spawn.
+fn parse_proxy_version_output(stdout: &[u8], stderr: &[u8]) -> Result<String, ProxyVersionError> {
+    if let Some(version) = version_token_from_bytes(stdout) {
+        return Ok(version);
+    }
+    if let Some(version) = version_token_from_bytes(stderr) {
+        return Ok(version);
+    }
+    Err(ProxyVersionError::IdentityMismatch {
+        detail: "output is not a cloud-sql-proxy version line".to_string(),
+    })
+}
+
+/// Pull the version token from text that contains
+/// `cloud-sql-proxy version <token>`.
+fn version_token_from_bytes(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        if let Some(token) = version_token_from_line(line) {
+            return Some(token);
+        }
+    }
+    // Also accept a single-line blob without a trailing newline.
+    version_token_from_line(text.trim())
+}
+
+fn version_token_from_line(line: &str) -> Option<String> {
+    const MARKER: &str = "cloud-sql-proxy version ";
+    let line = line.trim();
+    let rest = line.strip_prefix(MARKER)?;
+    let token = rest.split_whitespace().next().unwrap_or("");
+    if token_looks_like_version(token) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// A version-ish token has at least one ASCII digit (covers
+/// `2.25.2+linux.amd64` and plain `2.25.2`).
+fn token_looks_like_version(token: &str) -> bool {
+    !token.is_empty() && token.chars().any(|c| c.is_ascii_digit())
 }
 
 /// [`resolve_proxy_bin`]'s search, taking an explicit `PATH` value so tests
@@ -289,15 +577,29 @@ mod tests {
     }
 
     fn write_file(dir: &Path, name: &str, contents: &[u8], mode: u32) -> PathBuf {
+        // Write to a sibling temp name, fsync, then rename into place.
+        // That avoids Linux ETXTBSY when a test spawns the file immediately
+        // after create (write handle must be fully closed first).
         let path = dir.join(name);
-        fs::write(&path, contents).expect("write test fixture file");
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+        let tmp = dir.join(format!(".{name}.tmp"));
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&tmp).expect("create test fixture temp file");
+            file.write_all(contents).expect("write test fixture file");
+            file.sync_all().expect("fsync test fixture file");
+        }
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
             .expect("set test fixture file permissions");
+        fs::rename(&tmp, &path).expect("rename test fixture into place");
         path
     }
 
     fn write_executable(dir: &Path, name: &str) -> PathBuf {
         write_file(dir, name, b"#!/bin/sh\n", 0o755)
+    }
+
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        write_file(dir, name, body.as_bytes(), 0o755)
     }
 
     fn write_non_executable(dir: &Path, name: &str) -> PathBuf {
@@ -388,27 +690,164 @@ mod tests {
     }
 
     #[test]
-    fn proxy_bin_check_passes_with_the_resolved_path_as_detail() {
-        let bin = PathBuf::from("/usr/bin/cloud-sql-proxy");
+    fn parse_proxy_version_output_reads_the_real_version_line() {
+        let version =
+            parse_proxy_version_output(b"cloud-sql-proxy version 2.25.2+linux.amd64\n", b"")
+                .expect("real cloud-sql-proxy -v line must parse");
 
-        let row = check_row_for_proxy_bin(Ok(bin.clone()));
+        assert_eq!(version, "2.25.2+linux.amd64");
+    }
+
+    #[test]
+    fn parse_proxy_version_output_falls_back_to_stderr() {
+        let version = parse_proxy_version_output(b"", b"cloud-sql-proxy version 2.0.0\n")
+            .expect("version line on stderr must parse");
+
+        assert_eq!(version, "2.0.0");
+    }
+
+    #[test]
+    fn parse_proxy_version_output_rejects_empty_output() {
+        let err =
+            parse_proxy_version_output(b"", b"").expect_err("empty output is not a version line");
+
+        assert!(matches!(err, ProxyVersionError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn parse_proxy_version_output_rejects_unrelated_help_text() {
+        let err = parse_proxy_version_output(b"Usage: some-other-tool [flags]\n", b"")
+            .expect_err("unrelated help text is not cloud-sql-proxy");
+
+        assert!(matches!(err, ProxyVersionError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn parse_proxy_version_output_rejects_a_line_without_a_version_token() {
+        let err = parse_proxy_version_output(b"cloud-sql-proxy version \n", b"")
+            .expect_err("missing version token must fail");
+
+        assert!(matches!(err, ProxyVersionError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn parse_proxy_version_output_rejects_a_wrong_product_name() {
+        let err = parse_proxy_version_output(b"other-proxy version 1.2.3\n", b"")
+            .expect_err("wrong product name must fail");
+
+        assert!(matches!(err, ProxyVersionError::IdentityMismatch { .. }));
+    }
+
+    #[test]
+    fn check_row_for_proxy_bin_probe_passes_with_path_and_version() {
+        let path = PathBuf::from("/usr/bin/cloud-sql-proxy");
+
+        let row = check_row_for_proxy_bin_probe(&path, Ok("2.25.2+linux.amd64".to_string()));
 
         assert_eq!(row.id, "proxy_bin");
         assert_eq!(row.status, CheckStatus::Pass);
-        assert_eq!(row.detail, bin.display().to_string());
+        assert_eq!(row.detail, "/usr/bin/cloud-sql-proxy (2.25.2+linux.amd64)");
         assert_eq!(row.hint, None);
     }
 
     #[test]
+    fn check_row_for_proxy_bin_probe_fails_on_identity_mismatch() {
+        let path = PathBuf::from("/usr/bin/not-proxy");
+
+        let row = check_row_for_proxy_bin_probe(
+            &path,
+            Err(ProxyVersionError::IdentityMismatch {
+                detail: "output is not a cloud-sql-proxy version line".to_string(),
+            }),
+        );
+
+        assert_eq!(row.id, "proxy_bin");
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("/usr/bin/not-proxy"));
+        assert!(row.hint.is_some());
+    }
+
+    #[test]
     fn proxy_bin_check_fails_with_a_hint_when_not_found() {
-        let row = check_row_for_proxy_bin(Err(ProxyBinError::NotFound {
+        let row = check_row_for_proxy_bin_resolve_error(ProxyBinError::NotFound {
             name: "cloud-sql-proxy".to_string(),
-        }));
+        });
 
         assert_eq!(row.id, "proxy_bin");
         assert_eq!(row.status, CheckStatus::Fail);
         assert!(row.detail.contains("cloud-sql-proxy"));
         assert!(row.hint.is_some());
+    }
+
+    #[test]
+    fn probe_proxy_version_passes_for_a_script_that_prints_the_real_line() {
+        let dir = TempDir::new("probe-ok");
+        let bin = write_script(
+            dir.path(),
+            "cloud-sql-proxy",
+            "#!/bin/sh\necho 'cloud-sql-proxy version 2.25.2+linux.amd64'\n",
+        );
+
+        let row = check_row_for_proxy_bin_probe(&bin, probe_proxy_version(&bin));
+
+        assert_eq!(row.status, CheckStatus::Pass);
+        assert_eq!(
+            row.detail,
+            format!("{} (2.25.2+linux.amd64)", bin.display())
+        );
+        assert_eq!(row.hint, None);
+    }
+
+    #[test]
+    fn probe_proxy_version_fails_for_a_script_with_wrong_identity() {
+        let dir = TempDir::new("probe-wrong");
+        let bin = write_script(
+            dir.path(),
+            "cloud-sql-proxy",
+            "#!/bin/sh\necho 'hello from some other tool'\n",
+        );
+
+        let row = check_row_for_proxy_bin_probe(&bin, probe_proxy_version(&bin));
+
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains(&bin.display().to_string()));
+        assert!(row.hint.is_some());
+    }
+
+    #[test]
+    fn probe_proxy_version_fails_for_a_script_that_exits_non_zero() {
+        let dir = TempDir::new("probe-exit");
+        let bin = write_script(
+            dir.path(),
+            "cloud-sql-proxy",
+            "#!/bin/sh\necho 'cloud-sql-proxy version 2.25.2+linux.amd64'\nexit 1\n",
+        );
+
+        let row = check_row_for_proxy_bin_probe(&bin, probe_proxy_version(&bin));
+
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("exited"));
+        assert!(row.hint.is_some());
+    }
+
+    #[test]
+    fn probe_proxy_version_fails_when_the_script_hangs_past_the_timeout() {
+        let dir = TempDir::new("probe-hang");
+        // Sleep longer than PROXY_VERSION_TIMEOUT so the probe must kill it.
+        let bin = write_script(dir.path(), "cloud-sql-proxy", "#!/bin/sh\nsleep 30\n");
+
+        let started = Instant::now();
+        let row = check_row_for_proxy_bin_probe(&bin, probe_proxy_version(&bin));
+        let elapsed = started.elapsed();
+
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("timed out"));
+        assert!(row.hint.is_some());
+        // Bound the wait so a hang in the probe itself fails the test suite.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "version probe took too long: {elapsed:?}"
+        );
     }
 
     #[test]
