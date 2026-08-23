@@ -275,11 +275,17 @@ fn try_start(connection: &Connection, config: &Config, wait_ms: u64) -> TargetRe
 /// `Connection` has no per-id override — so an unresolved binary fails
 /// identically for every target in this batch, matching
 /// `docs/cli-contract.v1.md`'s exit `3`: "proxy binary unresolved when
-/// required for the whole command". Reuses `env::proxy_bin_check`'s
-/// message instead of duplicating it.
+/// required for the whole command". Builds the row from the error
+/// `resolve_proxy_bin` already returned, via
+/// `env::check_row_for_proxy_bin_resolve_error`, instead of calling
+/// `env::proxy_bin_check` — that would re-resolve `proxy_bin` a second
+/// time and, on a `PATH` that changed between the two calls, could spawn
+/// doctor's version probe on start's happy path
+/// (`docs/doctor.v1.md`, "`proxy_bin` — hard": "Start still only resolves
+/// the path ... it does not run `-v` on the happy path").
 fn resolve_proxy_bin_or_failure(config: &Config) -> Result<PathBuf, TargetResult> {
-    env::resolve_proxy_bin(Some(&config.proxy_bin)).map_err(|_| {
-        let check = env::proxy_bin_check(Some(&config.proxy_bin));
+    env::resolve_proxy_bin(Some(&config.proxy_bin)).map_err(|err| {
+        let check = env::check_row_for_proxy_bin_resolve_error(err);
         TargetResult::Dependency {
             message: check_message(&check.detail, check.hint.as_deref()),
         }

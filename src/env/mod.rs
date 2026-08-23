@@ -6,12 +6,18 @@
 //!
 //! `commands::doctor` (#44) calls the `*_check` rows below.
 //! `commands::start` (#43) calls `resolve_proxy_bin` / `adc_status` directly
-//! and reuses `proxy_bin_check` / `adc_check` messages for bin_missing / auth.
+//! and reuses [`check_row_for_proxy_bin_resolve_error`] / `adc_check`'s
+//! message for bin_missing / auth. Start only needs the resolve failure
+//! message; the version probe (`version_probe`) runs only on doctor's path
+//! after a successful resolve.
+
+mod version_probe;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::model::{CheckRow, CheckStatus};
+use version_probe::ProxyVersionError;
 
 const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
 
@@ -21,40 +27,83 @@ const DEFAULT_PROXY_BIN: &str = "cloud-sql-proxy";
 /// `configured` is the connections file's top-level `proxy_bin` value, or
 /// `None` to use the built-in default name. An absolute path must be an
 /// executable file; a bare name is searched on `PATH` the same way a shell
-/// would. Mutate (#43) will call this directly for **start**'s env
-/// forwarding; [`proxy_bin_check`] below already makes it reachable.
+/// would. Mutate (#43) calls this directly for **start**'s env forwarding
+/// and, on failure, builds its own row via
+/// [`check_row_for_proxy_bin_resolve_error`] instead of calling
+/// [`proxy_bin_check`] (which would re-resolve and could spawn the probe).
+///
+/// This function only resolves a path. It does **not** spawn the binary or
+/// check identity. Doctor's version probe lives in [`proxy_bin_check`].
 pub(crate) fn resolve_proxy_bin(configured: Option<&str>) -> Result<PathBuf, ProxyBinError> {
     let name = configured.unwrap_or(DEFAULT_PROXY_BIN);
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     resolve_bin(name, &path_env)
 }
 
-/// Doctor's `proxy_bin` row (`docs/doctor.v1.md`, "`proxy_bin` — hard"),
-/// built on [`resolve_proxy_bin`].
+/// Doctor's `proxy_bin` row (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+///
+/// Resolve first. On resolve failure, return the existing fail row (start
+/// builds the same row itself on its own resolve failure, without calling
+/// this function — see [`resolve_proxy_bin`]). On resolve success, spawn
+/// `resolved -v` with a short timeout and require cloud-sql-proxy identity
+/// output.
 pub(crate) fn proxy_bin_check(configured: Option<&str>) -> CheckRow {
-    check_row_for_proxy_bin(resolve_proxy_bin(configured))
+    match resolve_proxy_bin(configured) {
+        Err(err) => check_row_for_proxy_bin_resolve_error(err),
+        Ok(path) => check_row_for_proxy_bin_probe(&path, version_probe::probe_proxy_version(&path)),
+    }
 }
 
-fn check_row_for_proxy_bin(resolved: Result<PathBuf, ProxyBinError>) -> CheckRow {
-    match resolved {
-        Ok(path) => CheckRow {
+/// The `proxy_bin` fail row for a resolve failure, shared by doctor
+/// ([`proxy_bin_check`]) and mutate's own resolve-failure path so both
+/// report the same message without either one re-resolving (re-resolving
+/// on mutate's side could hit a since-fixed `PATH` and then spawn the
+/// version probe on start's happy path, which `docs/doctor.v1.md` reserves
+/// for doctor).
+pub(crate) fn check_row_for_proxy_bin_resolve_error(err: ProxyBinError) -> CheckRow {
+    CheckRow {
+        id: "proxy_bin".to_string(),
+        status: CheckStatus::Fail,
+        detail: err.to_string(),
+        hint: Some(PROXY_BIN_INSTALL_HINT.to_string()),
+    }
+}
+
+/// Assemble the doctor row after a successful path resolve, from the
+/// version-probe result. Pure so tests can feed scripted probe outcomes
+/// without spawning (`AGENTS.md`: name the pure fn).
+fn check_row_for_proxy_bin_probe(
+    path: &Path,
+    probe: Result<String, ProxyVersionError>,
+) -> CheckRow {
+    match probe {
+        Ok(version) => CheckRow {
             id: "proxy_bin".to_string(),
             status: CheckStatus::Pass,
-            detail: path.display().to_string(),
+            detail: format_proxy_bin_pass_detail(path, &version),
             hint: None,
         },
         Err(err) => CheckRow {
             id: "proxy_bin".to_string(),
             status: CheckStatus::Fail,
-            detail: err.to_string(),
-            hint: Some(
-                "Install cloud-sql-proxy, or set \"proxy_bin\" in connections.json to its \
-                 absolute path."
-                    .to_string(),
-            ),
+            detail: format_proxy_version_fail_detail(path, &err),
+            hint: Some(err.hint().to_string()),
         },
     }
 }
+
+/// Pass `detail` shape: `{path} ({version_token})`
+/// (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+fn format_proxy_bin_pass_detail(path: &Path, version: &str) -> String {
+    format!("{} ({version})", path.display())
+}
+
+fn format_proxy_version_fail_detail(path: &Path, err: &ProxyVersionError) -> String {
+    format!("{}: {err}", path.display())
+}
+
+const PROXY_BIN_INSTALL_HINT: &str = "Install cloud-sql-proxy, or set \"proxy_bin\" in \
+                                       connections.json to its absolute path.";
 
 /// [`resolve_proxy_bin`]'s search, taking an explicit `PATH` value so tests
 /// never touch the process environment.
@@ -289,10 +338,20 @@ mod tests {
     }
 
     fn write_file(dir: &Path, name: &str, contents: &[u8], mode: u32) -> PathBuf {
+        // Write to a sibling temp name, fsync, then rename into place.
+        // That avoids Linux ETXTBSY when a test spawns the file immediately
+        // after create (write handle must be fully closed first).
         let path = dir.join(name);
-        fs::write(&path, contents).expect("write test fixture file");
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+        let tmp = dir.join(format!(".{name}.tmp"));
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&tmp).expect("create test fixture temp file");
+            file.write_all(contents).expect("write test fixture file");
+            file.sync_all().expect("fsync test fixture file");
+        }
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
             .expect("set test fixture file permissions");
+        fs::rename(&tmp, &path).expect("rename test fixture into place");
         path
     }
 
@@ -388,22 +447,39 @@ mod tests {
     }
 
     #[test]
-    fn proxy_bin_check_passes_with_the_resolved_path_as_detail() {
-        let bin = PathBuf::from("/usr/bin/cloud-sql-proxy");
+    fn check_row_for_proxy_bin_probe_passes_with_path_and_version() {
+        let path = PathBuf::from("/usr/bin/cloud-sql-proxy");
 
-        let row = check_row_for_proxy_bin(Ok(bin.clone()));
+        let row = check_row_for_proxy_bin_probe(&path, Ok("2.25.2+linux.amd64".to_string()));
 
         assert_eq!(row.id, "proxy_bin");
         assert_eq!(row.status, CheckStatus::Pass);
-        assert_eq!(row.detail, bin.display().to_string());
+        assert_eq!(row.detail, "/usr/bin/cloud-sql-proxy (2.25.2+linux.amd64)");
         assert_eq!(row.hint, None);
     }
 
     #[test]
+    fn check_row_for_proxy_bin_probe_fails_on_identity_mismatch() {
+        let path = PathBuf::from("/usr/bin/not-proxy");
+
+        let row = check_row_for_proxy_bin_probe(
+            &path,
+            Err(ProxyVersionError::IdentityMismatch {
+                detail: "output is not a cloud-sql-proxy version line".to_string(),
+            }),
+        );
+
+        assert_eq!(row.id, "proxy_bin");
+        assert_eq!(row.status, CheckStatus::Fail);
+        assert!(row.detail.contains("/usr/bin/not-proxy"));
+        assert!(row.hint.is_some());
+    }
+
+    #[test]
     fn proxy_bin_check_fails_with_a_hint_when_not_found() {
-        let row = check_row_for_proxy_bin(Err(ProxyBinError::NotFound {
+        let row = check_row_for_proxy_bin_resolve_error(ProxyBinError::NotFound {
             name: "cloud-sql-proxy".to_string(),
-        }));
+        });
 
         assert_eq!(row.id, "proxy_bin");
         assert_eq!(row.status, CheckStatus::Fail);

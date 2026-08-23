@@ -51,7 +51,7 @@ Hit the **same interfaces** callers use ([`modules.v1.md`](./modules.v1.md)). No
 
 | Adapter | Unit tests |
 |---------|------------|
-| `port`, `env` | Allowed and cheap: localhost sockets, temp ADC file. |
+| `port`, `env` | Allowed and cheap: localhost sockets, temp ADC file, fake `#!/bin/sh` scripts for the `proxy_bin` version probe (`env::version_probe::parse_proxy_version_output` is the pure fn; no real `cloud-sql-proxy` required). |
 | `supervisor`, `journal` | **Not required** as unit tests. |
 
 Do **not** add a `trait Supervisor` (or Clock, or Journal) for tests. A second real adapter is the only reason to introduce a trait.

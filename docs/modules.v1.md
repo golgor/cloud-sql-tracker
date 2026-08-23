@@ -217,7 +217,7 @@ Shared owner for PATH / ADC file discovery. Doctor is a **caller**, not a second
 | Fn | Role |
 |----|------|
 | `resolve_proxy_bin(cfg_or_default) -> Result<PathBuf, ProxyBinError>` | Absolute path for **start** |
-| `proxy_bin_check(cfg_or_default) -> CheckRow` | Doctor row, **built on** `resolve_proxy_bin` |
+| `proxy_bin_check(cfg_or_default) -> CheckRow` | Doctor row: resolve via `resolve_proxy_bin`, then probe `resolved -v` for identity/version |
 | `adc_status() -> AdcStatus` | `{ present, path, gac_env_set }` for **start** env forwarding |
 | `adc_check() -> CheckRow` | Doctor row, **built on** `adc_status` |
 
