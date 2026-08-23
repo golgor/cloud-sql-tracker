@@ -40,3 +40,20 @@ run = [
   "mise run test",
   "mise run contracts",
 ]
+
+[tasks.build-release]
+description = "Optimized release binary (same profile as GitHub Release)"
+run = "cargo build --release --locked"
+
+# Symlink keeps PATH pointed at this worktree's target/release binary after each rebuild.
+[tasks.install-local]
+description = "Build release and symlink into ~/.local/bin for PATH dogfood"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+mise run build-release
+mkdir -p "${HOME}/.local/bin"
+ln -sfn "${PWD}/target/release/cloud-sql-tracker" "${HOME}/.local/bin/cloud-sql-tracker"
+echo "linked ${HOME}/.local/bin/cloud-sql-tracker -> ${PWD}/target/release/cloud-sql-tracker"
+"${HOME}/.local/bin/cloud-sql-tracker" --version
+"""

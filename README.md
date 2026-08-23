@@ -23,7 +23,11 @@ mise install          # rust + rustfmt + clippy, hk, check-jsonschema; installs 
 mise run check        # fmt-check, clippy, cargo test, Layer 1 contracts
 mise run fmt          # cargo fmt
 mise run test         # cargo test (never --include-ignored)
+mise run build-release  # cargo build --release --locked (same profile as GitHub Release)
+mise run install-local  # release build + symlink ~/.local/bin/cloud-sql-tracker -> target/release/…
 ```
+
+`install-local` is for dogfood on PATH: rebuild with the same command after code changes (the symlink stays put). Prefer a debug `cargo build` loop only when you need faster compile cycles and do not care about release size/speed.
 
 Focused Cargo commands stay valid (`cargo test reconcile`). Prefer `mise run …` for the full gate so tool versions match. Hooks: `hk install --mise` (also the mise `postinstall` hook). Pre-commit formats Rust. Pre-push runs the same checks as CI.
 
