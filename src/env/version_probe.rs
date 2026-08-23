@@ -6,20 +6,24 @@
 //! pure parsing; `env`'s public seam (`proxy_bin_check`) is unchanged by
 //! this split.
 
-use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use rustix::process::{kill_process_group, Pid, Signal};
 
 /// How long doctor waits for `cloud-sql-proxy -v` before failing the check
 /// (`docs/doctor.v1.md`, "`proxy_bin` — hard").
+///
+/// Why this exists at all: plain `Command::output()` blocks until the
+/// child exits, with no way to give up. `proxy_bin` is an
+/// operator-configured path, and the Omarchy plugin runs doctor on every
+/// panel open (plugin issue #31). A misconfigured binary that waits on
+/// stdin, or never exits, would hang the panel forever. The probe needs a
+/// hard ceiling so a bad `proxy_bin` fails doctor instead of freezing it.
 const PROXY_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Poll interval while waiting for the version child to exit.
-const PROXY_VERSION_POLL: Duration = Duration::from_millis(20);
 
 const PROXY_BIN_IDENTITY_HINT: &str = "The resolved binary did not identify as cloud-sql-proxy. \
                                         Install cloud-sql-proxy, or set \"proxy_bin\" in \
@@ -34,7 +38,8 @@ const PROXY_BIN_PROBE_HINT: &str = "Could not read a version from the resolved b
 pub(super) enum ProxyVersionError {
     /// `Command::spawn` failed (permissions, I/O, ...).
     SpawnFailed { detail: String },
-    /// `Child::try_wait` returned an OS error while polling for exit.
+    /// `Child::wait_with_output` returned an OS error, or the waiter
+    /// thread ended without sending a result.
     WaitFailed { detail: String },
     /// Child did not exit within [`PROXY_VERSION_TIMEOUT`].
     TimedOut,
@@ -99,67 +104,50 @@ struct ProxyVersionOutput {
 }
 
 fn run_proxy_version_command(path: &Path) -> Result<ProxyVersionOutput, ProxyVersionError> {
-    // Own process group so a timeout can kill shell helpers (e.g. `sleep`)
-    // started by a wrapper script, not only the direct child PID.
-    let mut child = spawn_version_probe(path)?;
+    let child = spawn_version_probe(path)?;
 
-    // Read pipes on side threads while we wait. That avoids a pipe-buffer
-    // deadlock if a bad binary writes a lot before exiting, and keeps the
-    // wait loop small. A read error (pipe closed early, etc.) is dropped on
-    // purpose: the reader still returns whatever bytes it collected, and a
-    // truncated or empty read fails identity parsing on its own.
-    let mut stdout_pipe = child
-        .stdout
-        .take()
-        .expect("stdout was piped on the version probe child");
-    let mut stderr_pipe = child
-        .stderr
-        .take()
-        .expect("stderr was piped on the version probe child");
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf);
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf);
-        buf
+    // Save the pid before the child moves into the waiter thread below.
+    // The timeout path needs it to kill the process group; by then the
+    // `Child` value itself belongs to that thread, not this one.
+    let pid = child.id();
+
+    // Rust's std has no "wait for a child, but give up after N seconds".
+    // `Child::wait` blocks forever, and `Child::try_wait` never blocks at
+    // all. So we block in a side thread and bound the *channel receive*
+    // on this thread instead of bounding the wait itself.
+    //
+    // That thread calls `wait_with_output`, not a bare `wait`, so it also
+    // drains stdout and stderr while it waits. Draining matters: a pipe
+    // buffer is about 64 KB, so a binary that writes more than that
+    // blocks on its own `write()` call and never exits. Without draining
+    // concurrently with the wait, a merely chatty binary would look
+    // exactly like a hang. This is also why one thread is enough here,
+    // where the previous version needed two hand-rolled reader threads:
+    // `wait_with_output` already does that draining for us.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
     });
 
-    let deadline = Instant::now() + PROXY_VERSION_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    terminate_version_probe(&mut child);
-                    // Drop readers after kill so join cannot hang forever.
-                    let _ = stdout_reader.join();
-                    let _ = stderr_reader.join();
-                    return Err(ProxyVersionError::TimedOut);
-                }
-                std::thread::sleep(PROXY_VERSION_POLL);
-            }
-            Err(err) => {
-                terminate_version_probe(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(ProxyVersionError::WaitFailed {
-                    detail: err.to_string(),
-                });
-            }
+    match rx.recv_timeout(PROXY_VERSION_TIMEOUT) {
+        Ok(Ok(output)) => Ok(ProxyVersionOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }),
+        Ok(Err(err)) => Err(ProxyVersionError::WaitFailed {
+            detail: err.to_string(),
+        }),
+        Err(RecvTimeoutError::Timeout) => {
+            terminate_version_probe(pid);
+            Err(ProxyVersionError::TimedOut)
         }
-    };
-
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
-
-    Ok(ProxyVersionOutput {
-        status,
-        stdout,
-        stderr,
-    })
+        // The waiter thread panicked or dropped its sender without
+        // sending — not expected, but do not panic the caller over it.
+        Err(RecvTimeoutError::Disconnected) => Err(ProxyVersionError::WaitFailed {
+            detail: "version probe wait thread ended without a result".to_string(),
+        }),
+    }
 }
 
 /// Spawn `path -v` in its own process group.
@@ -175,17 +163,21 @@ fn spawn_version_probe(path: &Path) -> Result<Child, ProxyVersionError> {
         })
 }
 
-/// Kill the version-probe process group, then reap the direct child.
+/// Kill the version-probe process group on a timeout.
 ///
 /// The child was started with [`CommandExt::process_group`]`(0)`, so its
-/// PID is also the process-group id. Group kill covers helper processes
-/// a shell script may start (for example `sleep`).
-fn terminate_version_probe(child: &mut Child) {
-    if let Some(pid) = Pid::from_raw(child.id() as i32) {
+/// PID is also the process-group id. Killing the group, not just the
+/// direct child, matters because a wrapper script can start helpers (for
+/// example `sleep`); killing only the direct child would leave those
+/// helpers running and still holding the pipes open.
+///
+/// This only sends the signal. The waiter thread still owns the `Child`
+/// value and reaps it via its own `wait_with_output` call once the kill
+/// lands, so no separate `wait()` is needed here.
+fn terminate_version_probe(pid: u32) {
+    if let Some(pid) = Pid::from_raw(pid as i32) {
         let _ = kill_process_group(pid, Signal::KILL);
     }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// Parse `cloud-sql-proxy -v` output into the version token.
@@ -240,6 +232,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
     static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
