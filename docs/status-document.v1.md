@@ -72,12 +72,14 @@ Schema compatibility and binary release cadence are different clocks. A new CLI 
 | `starting` | integer ≥ 0 | yes | Count with `state === "starting"`. |
 | `error` | integer ≥ 0 | yes | Count with `state === "error"`. |
 | `stopped` | integer ≥ 0 | yes | Count with `state === "stopped"`. |
-| `total` | integer ≥ 0 | yes | `connections.length` (enabled connections included in the document). |
+| `total` | integer ≥ 0 | yes | `connections.length` — every Connection published in this snapshot, **including** `enabled: false` rows. |
 | `groups` | object | yes | Map of group name → group counters (see below). May be `{}` if no connections. |
 | `connections` | array | yes | One element per Connection included in this snapshot (stable order: config order). |
 
 **Invariant:** `running + starting + error + stopped === total`  
 **Invariant:** each group’s counters sum the same way for connections in that group; sum of group `total` values === `total`.
+
+**Disabled rows and aggregates:** top-level and per-group counters count **every published row**, including `enabled: false`. A disabled idle Connection still increments `stopped` (and group `stopped` / `total`). Enabled-only denominators for UIs are the **consumer’s** job — this document does not ship separate `enabled_total` counters in v1.
 
 ### `groups[name]`
 
@@ -104,6 +106,7 @@ Group names are free strings from config (`fe`, `backend`, `iot`, …).
 | `address` | string | yes | Local bind address (default `127.0.0.1`). |
 | `port` | integer 1–65535 | yes | Local listen port. |
 | `private_ip` | boolean | yes | Whether proxy should use private IP (config). |
+| `enabled` | boolean | yes | Whether this Connection may be started (config, post-merge). Orthogonal to Health `state`. `false` → single-id `start`/`restart` refuse (exit 2); multi-target start skips. Idle disabled rows are typically `state: "stopped"`. **Consumers:** if the field is missing (older CLI), treat as `true`. |
 | `state` | string enum | yes | Health state — see below. |
 | `source` | string enum | yes | Process ownership signal — see below. |
 | `pid` | integer \| null | yes | Main proxy PID if known; else `null`. |
@@ -200,6 +203,7 @@ The plugin should call **`status --json` only** for bar state. Full argv contrac
 4. Render `connections` grouped by `group` (or use `groups` for headers only).
 5. On row: `state`, `source`, `port`, `error.detail` if any.
 6. Ignore unknown fields and unknown `error.code` values.
+7. If `connections[].enabled` is missing (older CLI), treat as `true` (config default).
 
 ---
 

@@ -39,6 +39,7 @@
       "address": "127.0.0.1",
       "port": 15432,
       "private_ip": false,
+      "enabled": true,
       "state": "running",
       "source": "unit",
       "pid": 12001,
@@ -55,6 +56,7 @@
       "address": "127.0.0.1",
       "port": 15433,
       "private_ip": false,
+      "enabled": false,
       "state": "stopped",
       "source": "none",
       "pid": null,
@@ -71,6 +73,7 @@
       "address": "127.0.0.1",
       "port": 15434,
       "private_ip": false,
+      "enabled": true,
       "state": "error",
       "source": "none",
       "pid": null,
@@ -79,7 +82,7 @@
       "uptime_sec": null,
       "error": {
         "code": "port_in_use",
-        "detail": "port 15434 held by cloud-sql-proxy (pid 12002) — not our unit; stop the leftover process manually"
+        "detail": "port 15434 held by cloud-sql-proxy (pid 12002) \u2014 not our unit; stop the leftover process manually"
       }
     },
     {
@@ -90,6 +93,7 @@
       "address": "127.0.0.1",
       "port": 15435,
       "private_ip": false,
+      "enabled": true,
       "state": "error",
       "source": "none",
       "pid": null,
@@ -109,6 +113,7 @@
       "address": "127.0.0.1",
       "port": 15436,
       "private_ip": false,
+      "enabled": true,
       "state": "stopped",
       "source": "none",
       "pid": null,
@@ -125,6 +130,7 @@
       "address": "127.0.0.1",
       "port": 15437,
       "private_ip": false,
+      "enabled": true,
       "state": "stopped",
       "source": "none",
       "pid": null,
@@ -141,6 +147,7 @@
       "address": "127.0.0.1",
       "port": 15438,
       "private_ip": false,
+      "enabled": true,
       "state": "stopped",
       "source": "none",
       "pid": null,

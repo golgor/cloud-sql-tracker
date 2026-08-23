@@ -201,6 +201,7 @@ mod tests {
             address: "127.0.0.1".to_string(),
             port: 15432,
             private_ip: false,
+            enabled: true,
             state,
             source: crate::model::Source::None,
             pid: None,

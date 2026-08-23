@@ -139,7 +139,7 @@ Duplicate `instance` is forbidden in v1 (one Connection per Cloud SQL instance i
 
 | Behavior | Rule |
 |----------|------|
-| Present in Status document | **Yes** (not hidden) |
+| Present in Status document | **Yes** (not hidden); Status row carries `enabled: false` so consumers need not read this file |
 | Typical `state` when idle | `stopped` |
 | `start` / `restart` targeting this id | **Refuse**, exit **2**, clear message |
 | `stop` | Success no-op |

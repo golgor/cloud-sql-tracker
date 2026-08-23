@@ -121,6 +121,7 @@ pub(crate) fn reconcile(
         address: identity.address.clone(),
         port: identity.port,
         private_ip: identity.private_ip,
+        enabled: identity.enabled,
         state: classification.state,
         source: classification.source,
         pid: classification.pid,
@@ -1041,15 +1042,23 @@ mod tests {
         assert_eq!(row.unit.unwrap().as_str(), "cloud-sql-proxy-fe-dev.service");
     }
 
-    // -- enabled is ignored ---------------------------------------------------
+    // -- enabled (start policy; orthogonal to Health) -------------------------
 
     #[test]
-    fn disabled_connection_still_reports_its_real_health() {
+    fn disabled_connection_still_reports_its_real_health_and_copies_enabled() {
+        // Reconcile must not invent a Health state for disabled; it still
+        // reports machine truth. Status publishes `enabled` so consumers can
+        // refuse start without reading config (issue #75).
         let mut connection = connection("fe-dev", 15432);
         connection.enabled = false;
         let unit = unit_with(UnitState::Active, Some(111), Some(now()));
         let port = port_with(PortProbe::Open, Some(111), None);
-        let row = reconcile(&connection, &observe(unit, port), now());
+        let row = reconcile(&connection, &observe(unit, port.clone()), now());
         assert_eq!(row.state, HealthState::Running);
+        assert!(!row.enabled);
+
+        connection.enabled = true;
+        let row = reconcile(&connection, &observe(unit, port), now());
+        assert!(row.enabled);
     }
 }
