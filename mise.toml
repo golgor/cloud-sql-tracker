@@ -57,3 +57,7 @@ ln -sfn "${PWD}/target/release/cloud-sql-tracker" "${HOME}/.local/bin/cloud-sql-
 echo "linked ${HOME}/.local/bin/cloud-sql-tracker -> ${PWD}/target/release/cloud-sql-tracker"
 "${HOME}/.local/bin/cloud-sql-tracker" --version
 """
+
+[tasks.book]
+description = "Serve the textbook locally at http://localhost:8080"
+run = "python3 -m http.server 8080 --directory learning"

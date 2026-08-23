@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>09. The commands seam — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part IV &rsaquo; Chapter 09</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 09 &middot; Part IV</p>
+  <h1>The commands seam</h1>
+  <p class="lede">Discover the application logic layer: how cloud-sql-tracker orchestrates pure reconciliation with operating system adapters, manages multi-target lifecycle batches without transactional rollback, and keeps the entire domain independent of command-line argument parsing.</p>
+</header>
+
+<p>In Parts II and III, we examined the building blocks: the pure <a href="../reference/glossary.html#reconcile">Reconcile</a> decision engine and the low-level operating system adapters (<a href="../reference/glossary.html#supervisor">Supervisor</a> D-Bus, <a href="../reference/glossary.html#port">Port</a> TCP/<a href="../reference/glossary.html#procfs">procfs</a>, <a href="../reference/glossary.html#adc">ADC</a> discovery, and <a href="../reference/glossary.html#journalctl">Journal</a> streaming). Now we step up one layer into <code>src/commands/</code>.</p>
+
+<p>The <code>commands</code> module is the <strong>one public business logic seam</strong> of the library crate. It coordinates what the program can actually <em>do</em>: query status, start proxies, stop proxies, restart proxies, run doctor diagnostics, and view logs.</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│               cli (clap argv & formatting)             │
+└───────────────────────────┬────────────────────────────┘
+                            │ typed structs (Selector, wait_ms)
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                     commands seam                      │
+│   select.rs │ status.rs │ mutate.rs │ doctor.rs │ logs.rs  │
+└─────────────┬───────────────────────────┬──────────────┘
+              │                           │
+              ▼                           ▼
+┌───────────────────────────┐   ┌────────────────────────┐
+│     reconcile (pure)      │   │   adapters (I/O)       │
+│  Decision truth table     │   │ supervisor, port, env  │
+└───────────────────────────┘   └────────────────────────┘</div>
+
+<div class="why">
+  <span class="label">Why</span>
+  <p>Per <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/modules.v1.md"><code>docs/modules.v1.md</code></a>, the dependency direction is strictly acyclic: <code>cli</code> calls <code>commands</code>; <code>commands</code> calls <code>reconcile</code> and adapters; adapters and <code>reconcile</code> <strong>never</strong> call <code>commands</code>. Furthermore, <code>commands</code> contains zero <code>clap</code> types, zero <code>println!</code> or <code>eprintln!</code> statements, and zero exit code logic. It operates entirely on domain structs and returns typed results.</p>
+</div>
+
+<h2>1. The public facade (<code>src/commands.rs</code>)</h2>
+
+<p>Although <code>commands</code> is broken into internal sub-files for readability, it exposes a compact, unified public API to the CLI:</p>
+
+<pre><code>mod doctor;
+mod logs;
+mod mutate;
+mod select;
+mod status;
+
+pub(crate) use doctor::doctor;
+pub(crate) use logs::{logs, LogsCommandError};
+pub(crate) use mutate::{
+    restart, start, stop, BatchOutcome, TargetOutcome, TargetResult, DEFAULT_WAIT_MS,
+};
+pub(crate) use select::{SelectError, Selector};
+pub(crate) use status::{status, StatusCommandError};</code></pre>
+<p class="src">src/commands.rs:11–27</p>
+
+<h2>2. Target selection and error filtering (<code>src/commands/select.rs</code>)</h2>
+
+<p>Most subcommands operate on one or more <a href="../reference/glossary.html#connection">Connections</a>. The CLI parses arguments like <code>fe-dev</code>, <code>--group fe</code>, or <code>--all</code> into a typed <code>Selector</code> enum:</p>
+
+<pre><code>#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selector {
+    /// Every connection in the config document, in config order.
+    All,
+    /// A single connection id.
+    Id(String),
+    /// Every connection in one group, in config order.
+    Group(String),
+}</code></pre>
+<p class="src">src/commands/select.rs:19–27</p>
+
+<p>The <code>expand</code> function resolves a <code>Selector</code> against a loaded <a href="../reference/glossary.html#config"><code>Config</code></a>. Crucially, <code>expand</code> is a <strong>pure function</strong> and always preserves configuration file order:</p>
+
+<pre><code>pub(crate) fn expand<'a>(
+    config: &'a Config,
+    selector: &Selector,
+) -> Result<Vec<&'a Connection>, SelectError> {
+    match selector {
+        Selector::All => Ok(config.connections.iter().collect()),
+        Selector::Id(id) => config::by_id(config, id)
+            .map(|connection| vec![connection])
+            .ok_or_else(|| SelectError::UnknownId(id.clone())),
+        Selector::Group(group) => {
+            let matches: Vec<&Connection> = config
+                .connections
+                .iter()
+                .filter(|connection| &connection.group == group)
+                .collect();
+            if matches.is_empty() {
+                Err(SelectError::UnknownGroup(group.clone()))
+            } else {
+                Ok(matches)
+            }
+        }
+    }
+}</code></pre>
+<p class="src">src/commands/select.rs:43–64</p>
+
+<div class="note">
+  <span class="label">Disabled Connections</span>
+  <p>Notice that <code>expand()</code> intentionally includes disabled connections (<code>enabled: false</code>). The <code>status</code> command must report on <em>all</em> configured connections. Mutating commands (like <code>start</code>) apply their own disabled-skipping policy on top of this expanded list.</p>
+</div>
+
+<p>For <code>restart --failed</code>, <code>select.rs</code> provides a pure filter function:</p>
+
+<pre><code>pub(crate) fn filter_failed(rows: &[StatusRow]) -> Vec<&StatusRow> {
+    rows.iter()
+        .filter(|row| row.state == HealthState::Error)
+        .collect()
+}</code></pre>
+<p class="src">src/commands/select.rs:72–76</p>
+
+<p><code>--failed</code> is an error-state filter over already-reconciled rows, not a fourth selector variant. If no connections are currently in error, the filter returns an empty slice, which is a successful no-op rather than an error.</p>
+
+<h2>3. Querying system status (<code>src/commands/status.rs</code>)</h2>
+
+<p>The <code>status</code> command queries the state of the system and builds a canonical <a href="../reference/glossary.html#status-document">Status document</a>. For each selected Connection, it performs a complete round trip:</p>
+
+<ol>
+  <li>Inspects systemd D-Bus for the transient <a href="../reference/glossary.html#unit">Unit</a> state (<code>supervisor::show</code>).</li>
+  <li>Probes the local TCP port and inspects <code>procfs</code> (<code>port::observe</code>).</li>
+  <li>Combines both into a <code>reconcile::Observation</code>.</li>
+  <li>Passes the observation into pure <code>reconcile::reconcile()</code> to compute the <a href="../reference/glossary.html#health-state">Health state</a>.</li>
+</ol>
+
+<pre><code>pub(crate) fn status(
+    config: &Config,
+    selector: &Selector,
+) -> Result<StatusDocument, StatusCommandError> {
+    let targets = select::expand(config, selector)?;
+    let now = SystemTime::now();
+    let mono_now_usec = monotonic_now_usec();
+
+    let mut rows = Vec::with_capacity(targets.len());
+    for connection in targets {
+        rows.push(observe_and_reconcile(connection, now, mono_now_usec)?);
+    }
+
+    Ok(assemble_document(
+        rows,
+        now,
+        env!("CARGO_PKG_VERSION").to_string(),
+    ))
+}</code></pre>
+<p class="src">src/commands/status.rs:69–88</p>
+
+<h3>Monotonic clocks and start timestamps</h3>
+
+<p>When systemd launches a unit, it records the start timestamp as monotonic microseconds since boot (<code>ExecMainStartTimestampMonotonic</code>). To calculate human-readable start times (<code>started_at</code>) and uptime (<code>uptime_sec</code>), <code>status.rs</code> reads the kernel's monotonic clock using <code>rustix</code>:</p>
+
+<pre><code>pub(super) fn monotonic_now_usec() -> Option<u64> {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let sec_usec = u64::try_from(now.tv_sec).ok()?.checked_mul(1_000_000)?;
+    let nsec_usec = u64::try_from(now.tv_nsec).ok()? / 1_000;
+    sec_usec.checked_add(nsec_usec)
+}
+
+fn started_at_from_monotonic(
+    start_usec: u64,
+    now_usec: u64,
+    now: SystemTime,
+) -> Option<SystemTime> {
+    let age_usec = now_usec.checked_sub(start_usec)?;
+    now.checked_sub(Duration::from_micros(age_usec))
+}</code></pre>
+<p class="src">src/commands/status.rs:313–345</p>
+
+<div class="trap">
+  <span class="label">Clock Drift Trap</span>
+  <p>Why not read <code>/proc/uptime</code>? <code>/proc/uptime</code> measures <code>CLOCK_BOOTTIME</code>, which continues ticking while a machine is suspended. Systemd's <code>ExecMainStartTimestampMonotonic</code> uses <code>CLOCK_MONOTONIC</code>, which pauses during suspend. Using <code>/proc/uptime</code> on a laptop would cause calculated uptimes to drift by the cumulative suspend time! Reading <code>ClockId::Monotonic</code> via <code>rustix</code> guarantees clock domain alignment.</p>
+</div>
+
+<h3>RFC 3339 formatting without external dependencies</h3>
+
+<p>The top-level Status document requires an ISO/RFC 3339 UTC timestamp (e.g. <code>2026-08-23T19:30:00Z</code>). Rather than pulling in a heavy datetime crate like <code>chrono</code> or <code>time</code>, <code>status.rs</code> implements Howard Hinnant's famous <code>civil_from_days</code> algorithm:</p>
+
+<pre><code>fn format_rfc3339(now: SystemTime) -> String {
+    let total_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    let days = (total_secs / 86_400) as i64;
+    let secs_of_day = total_secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}</code></pre>
+<p class="src">src/commands/status.rs:396–410</p>
+
+<h2>4. Mutating operations: start, stop, and restart (<code>src/commands/mutate.rs</code>)</h2>
+
+<p>Mutating operations alter the state of systemd units. They adhere to several strict architectural principles:</p>
+
+<h3>Non-transactional batch execution</h3>
+<p>If you run <code>cloud-sql-tracker start --all</code> across 7 databases, each Connection is attempted independently. If connection 4 fails due to an invalid project ID, <strong>connections 1, 2, 3, 5, 6, and 7 remain running</strong>. There is no rollback. The operation returns a <code>BatchOutcome</code> detailing each target's individual result.</p>
+
+<pre><code>#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetResult {
+    /// The operation succeeded, including an idempotent no-op.
+    Succeeded,
+    /// Skipped during --group/--all because enabled: false.
+    SkippedDisabled,
+    /// A single-id start/restart targeted a disabled Connection (exit 2).
+    RefusedDisabled,
+    /// Operation attempted and failed (e.g. port conflict, crash).
+    Failed { code: ErrorCode, message: String },
+    /// Systemic failure: could not reach D-Bus or resolve proxy binary.
+    Dependency { message: String },
+}</code></pre>
+<p class="src">src/commands/mutate.rs:39–68</p>
+
+<h3>Idempotency</h3>
+<p>Running <code>start</code> on a Connection that is already <code>running</code> via our Unit is a success no-op. Running <code>stop</code> on a Connection that is already <code>stopped</code> is likewise a success no-op. No redundant D-Bus commands are issued.</p>
+
+<h3>Disabled connection policy</h3>
+<ul>
+  <li><strong>Single-ID target:</strong> Running <code>start backend-dev</code> when <code>backend-dev</code> has <code>enabled: false</code> is immediately refused as a usage error (<code>TargetResult::RefusedDisabled</code>, mapped to exit code <code>2</code>).</li>
+  <li><strong>Multi-target selector:</strong> Running <code>start --group backend</code> silently skips disabled connections (<code>TargetResult::SkippedDisabled</code>), printing a warning on stderr without failing the batch.</li>
+</ul>
+
+<h3>Safe unit recreation during restart</h3>
+<p>When restarting a proxy, why can't we immediately call <code>StartTransientUnit</code> as soon as Reconcile reports <code>Stopped</code>? Because systemd may still have the unit loaded in memory in a <code>deactivating</code> state. Issuing a new <code>StartTransientUnit</code> for a loaded unit causes a D-Bus <code>UnitExists</code> error.</p>
+
+<p>Therefore, <code>mutate.rs</code> enforces <code>unit_safely_recreatable()</code>:</p>
+
+<pre><code>fn unit_safely_recreatable(snapshot: &UnitSnapshot) -> bool {
+    matches!(snapshot, UnitSnapshot::Absent)
+}</code></pre>
+<p class="src">src/commands/mutate.rs:426–428</p>
+
+<p>The restart sequence stops the unit, polls until systemd has completely unloaded it (<code>UnitSnapshot::Absent</code>), and only then submits the new transient unit definition.</p>
+
+<h3>The two clocks: start-window vs wait-ms</h3>
+
+<div class="trap">
+  <span class="label">Critical Concept</span>
+  <p>There are two completely independent clocks in cloud-sql-tracker:</p>
+  <ul>
+    <li><strong>Reconcile <code>START_WINDOW</code> (10s):</strong> Classifies a single instantaneous observation. If a unit is activating and its port is closed after 10s, Reconcile labels that snapshot as <code>ErrorCode::StartTimeout</code>.</li>
+    <li><strong>CLI <code>--wait-ms</code> (default 10s):</strong> The total time the operator allows <code>start</code> or <code>restart</code> to poll until the proxy starts listening.</li>
+  </ul>
+  <p>A single poll might return Reconcile's <code>start_timeout</code> (e.g. if the proxy took 10.1s to authorize with GCP), but if <code>--wait-ms 30000</code> was requested, the CLI <strong>must not abort early</strong>! It must continue polling until the port opens or <code>--wait-ms</code> expires.</p>
+</div>
+
+<p>This is implemented in <code>wait_step</code>, which distinguishes permanent errors (like port conflicts) from transient start timeouts:</p>
+
+<pre><code>fn is_permanent_start_failure(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::PortInUse
+            | ErrorCode::ExecFailed
+            | ErrorCode::Auth
+            | ErrorCode::Config
+            | ErrorCode::BinMissing
+    )
+}
+
+fn wait_step(
+    row: &StatusRow,
+    is_done: &impl Fn(&StatusRow) -> bool,
+    remaining: Duration,
+    wait_ms: u64,
+    id: &str,
+    timeout_code: ErrorCode,
+) -> Option<TargetResult> {
+    if is_done(row) {
+        return Some(TargetResult::Succeeded);
+    }
+    if let Some(result) = permanent_start_failure(row) {
+        return Some(result);
+    }
+    if remaining.is_zero() {
+        if let Some(error) = row.error.as_ref() {
+            return Some(TargetResult::Failed {
+                code: error.code,
+                message: error.detail.clone(),
+            });
+        }
+        return Some(TargetResult::Failed {
+            code: timeout_code,
+            message: format!("connection `{id}` did not confirm within {wait_ms}ms"),
+        });
+    }
+    None
+}</code></pre>
+<p class="src">src/commands/mutate.rs:659–710</p>
+
+<p>This behavior is locked down by explicit unit tests:</p>
+
+<pre><code>#[test]
+fn wait_step_keeps_waiting_on_start_timeout_while_time_remains() {
+    let row = row(
+        HealthState::Error,
+        Source::Unit,
+        Some(StatusError {
+            code: ErrorCode::StartTimeout,
+            detail: "unit is still activating after the start window".to_string(),
+        }),
+    );
+    let result = wait_step(
+        &row,
+        &is_running,
+        Duration::from_secs(5),
+        10_000,
+        "a",
+        ErrorCode::StartTimeout,
+    );
+    assert_eq!(result, None);
+}</code></pre>
+<p class="src">src/commands/mutate.rs:1344–1364</p>
+
+<h2>5. Diagnostics and logs (<code>src/commands/doctor.rs</code>, <code>src/commands/logs.rs</code>)</h2>
+
+<h3>Doctor: never fail-fast</h3>
+<p>Unlike other commands, <code>doctor</code> must provide a comprehensive preflight checklist even if the configuration file is completely missing or malformed:</p>
+
+<pre><code>pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
+    let loaded = config::load(cfg_path);
+    let config = loaded.as_ref().ok();
+
+    let checks = vec![
+        config_check(cfg_path, &loaded),
+        env::proxy_bin_check(config.map(|config| config.proxy_bin.as_str())),
+        supervisor::systemd_user_check(),
+        env::adc_check(),
+        journal::journal_user_check(),
+        ports_check(config),
+    ];
+    let ok = all_checks_ok(&checks);
+
+    DoctorReport {
+        version: 1,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        ok,
+        checks,
+    }
+}
+
+fn all_checks_ok(checks: &[CheckRow]) -> bool {
+    !checks.iter().any(|check| check.status == CheckStatus::Fail)
+}</code></pre>
+<p class="src">src/commands/doctor.rs:40–64</p>
+
+<div class="pure">
+  <span class="label">Pure Invariant</span>
+  <p><code>all_checks_ok</code> establishes the strict contract rule: <code>ok === true</code> if and only if zero checks have <code>status: "fail"</code>. Warnings (such as port conflicts in <code>ports_check</code>) never cause <code>ok</code> to become <code>false</code>.</p>
+</div>
+
+<h3>Logs: clean facade</h3>
+<p><code>logs.rs</code> resolves a target Connection ID to its unit name and delegates journal fetching to the <code>journal</code> adapter:</p>
+
+<pre><code>pub(crate) fn logs(config: &Config, id: &str, lines: u32) -> Result<Dump, LogsCommandError> {
+    let unit = resolve_unit(config, id)?;
+    Ok(journal::dump(&unit, lines)?)
+}
+
+fn resolve_unit(config: &Config, id: &str) -> Result<UnitName, LogsCommandError> {
+    let connection =
+        config::by_id(config, id).ok_or_else(|| LogsCommandError::UnknownId(id.to_string()))?;
+    model::unit_name(&connection.id).map_err(|source| LogsCommandError::UnitName {
+        id: connection.id.clone(),
+        source,
+    })
+}</code></pre>
+<p class="src">src/commands/logs.rs:37–52</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>wait_step</code> in <code>mutate.rs</code> continue polling when Reconcile evaluates a single observation as <code>ErrorCode::StartTimeout</code>, rather than aborting immediately?
+      <details><summary>Answer</summary><p>Reconcile's 10-second start window classifies a single snapshot in time. A proxy initializing and authenticating with Google Cloud may take slightly longer than 10 seconds to open its port, but the operator allocated a separate <code>--wait-ms</code> polling budget. Aborting on the first start timeout would prematurely fail slow-starting but healthy proxies.</p></details>
+    </li>
+    <li>Why does <code>unit_safely_recreatable</code> require <code>UnitSnapshot::Absent</code> before restarting, rather than proceeding when Reconcile reports <code>HealthState::Stopped</code>?
+      <details><summary>Answer</summary><p>Reconcile reports <code>Stopped</code> as soon as a deactivating unit's port closes, but systemd still holds the unit definition in memory while teardown completes. Issuing <code>StartTransientUnit</code> while the unit is still loaded results in a D-Bus <code>UnitExists</code> error, so restart must wait until systemd fully unloads it.</p></details>
+    </li>
+    <li>Why does <code>doctor()</code> continue executing its remaining checks when <code>config::load()</code> fails, whereas every mutating command aborts immediately?
+      <details><summary>Answer</summary><p>Doctor is an exploratory preflight tool designed to diagnose system health comprehensively in a single run. An invalid config file is recorded as a failure for the <code>config</code> check, but testing the proxy binary, D-Bus connection, ADC credentials, and journal access provides valuable diagnostic information to the operator.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/modules.v1.md">docs/modules.v1.md</a> — The authoritative architectural specification defining crate module boundaries and pure versus I/O seams.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="08-smaller-adapters.html">&larr; 08. Three smaller adapters</a>
+  <a href="../index.html">Contents</a>
+  <a href="10-cli.html">10. The thin shell &rarr;</a>
+</nav>
+
+</body>
+</html>

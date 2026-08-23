@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>04. Contracts first — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part II &rsaquo; Chapter 04</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 04 &middot; Part II</p>
+  <h1>Contracts first</h1>
+  <p class="lede">How machine-readable JSON Schemas, golden fixtures, and layered verification prevent drift between documentation, CLI output, and UI consumers.</p>
+</header>
+
+<h2>The contract-first philosophy</h2>
+
+<p>In many software projects, machine interfaces are an afterthought: developers write code, export a data structure with <code>serde</code>, and reverse-engineer documentation from the output. When changes happen, documentation silently drifts from reality, breaking external consumers like desktop widgets or automation scripts.</p>
+
+<p>This project inverts that workflow. Every boundary between the control plane and the outside world is specified and locked <em>before</em> code is written. The contract is the specification, the test suite is the enforcer, and the Rust code is the implementation.</p>
+
+<h2>The Contract Trio rule</h2>
+
+<p>For every machine-readable JSON boundary in the project, the repository maintains exactly three synchronized artifacts known as a <strong>Contract Trio</strong>:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Artifact</th>
+      <th>Location</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>1. Prose specification</strong></td>
+      <td><code>docs/*.v1.md</code></td>
+      <td>Human-readable normative rules, field meanings, error catalogs, and transition tables.</td>
+    </tr>
+    <tr>
+      <td><strong>2. JSON Schema</strong></td>
+      <td><code>schemas/*.v1.json</code></td>
+      <td>Machine-readable Draft 2020-12 JSON Schema defining types, required fields, constraints, and rejection rules.</td>
+    </tr>
+    <tr>
+      <td><strong>3. Golden example</strong></td>
+      <td><code>examples/*.json</code></td>
+      <td>A concrete, realistic JSON snapshot demonstrating valid fields and structure.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="why">
+  <span class="label">The Invariant</span>
+  <p><strong>The Same-PR Rule:</strong> Touching any JSON field, enum variant, or validation rule requires updating the prose document, the JSON Schema, and the golden example together in the <em>same pull request</em>. A schema change without updated documentation or an example is rejected by review.</p>
+</div>
+
+<h2>The three JSON Contract Trios</h2>
+
+<p>The control plane defines three distinct JSON surfaces:</p>
+
+<ol>
+  <li><strong>Status Document Trio:</strong>
+    <ul>
+      <li>Prose: <code>docs/status-document.v1.md</code></li>
+      <li>Schema: <code>schemas/status.v1.json</code></li>
+      <li>Golden: <code>examples/status.v1.json</code></li>
+      <li>Produced exclusively by <code>cloud-sql-tracker status --json</code>. This is the primary telemetry consumed by the Omarchy desktop bar widget.</li>
+    </ul>
+  </li>
+  <li><strong>Configuration Trio:</strong>
+    <ul>
+      <li>Prose: <code>docs/config.v1.md</code></li>
+      <li>Schema: <code>schemas/config.v1.json</code></li>
+      <li>Golden: <code>examples/connections.json</code></li>
+      <li>Defines the schema for <code>~/.config/cloud-sql-tracker/connections.json</code>. Enforces strict key validation (unknown keys are rejected with exit code 2).</li>
+    </ul>
+  </li>
+  <li><strong>Doctor Report Trio:</strong>
+    <ul>
+      <li>Prose: <code>docs/doctor.v1.md</code></li>
+      <li>Schema: <code>schemas/doctor.v1.json</code></li>
+      <li>Golden: <code>examples/doctor.v1.json</code></li>
+      <li>Produced by <code>cloud-sql-tracker doctor --json</code>. Provides preflight checks for system readiness (config, proxy binary, user bus, credentials, journal, and ports).</li>
+    </ul>
+  </li>
+</ol>
+
+<div class="note">
+  <span class="label">Plain-Text and Argv Surfaces</span>
+  <p>Non-JSON interfaces (like <code>cloud-sql-tracker logs &lt;id&gt;</code> and command-line argument parsing) do not have a JSON Schema. They are specified with prose (e.g. <code>docs/logs.v1.md</code>, <code>docs/cli-contract.v1.md</code>) and companion text snapshots (e.g. <code>examples/logs.v1.txt</code>).</p>
+</div>
+
+<h2>Schema version vs binary version</h2>
+
+<p>Look at the top of any generated <a href="../reference/glossary.html#status-document">Status document</a> or Doctor report. You will see two version fields:</p>
+
+<pre><code>{
+  "version": 1,
+  "ts": "2026-08-20T19:45:00+02:00",
+  "cli_version": "0.1.1",
+  "running": 1,
+  "starting": 0,
+// ...</code></pre>
+<p class="src">examples/status.v1.json:1–6</p>
+
+<p>These two numbers serve completely different purposes:</p>
+
+<ul>
+  <li><code>version</code> (integer, currently <code>1</code>): The <strong>Schema ID</strong> of the document format. It bumps only on breaking structural changes (such as renaming or removing a required field, or altering an enum's semantics). Additive optional fields do not bump <code>version</code>.</li>
+  <li><code>cli_version</code> (string, e.g. <code>"0.1.1"</code>): The semver version of the compiled binary, derived directly from <code>CARGO_PKG_VERSION</code> in <code>Cargo.toml</code>.</li>
+</ul>
+
+<p>Correspondingly, the JSON Schema mandates these exact constraints:</p>
+
+<pre><code>  "required": [
+    "version",
+    "ts",
+    "cli_version",
+    "running",
+    "starting",
+    "error",
+    "stopped",
+    "total",
+    "groups",
+    "connections"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Status document schema id. Breaking shape changes bump this integer."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp when the snapshot was built."
+    },
+    "cli_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semver of the cloud-sql-tracker binary that produced this document."
+    },</code></pre>
+<p class="src">schemas/status.v1.json:9–33</p>
+
+<h2>Two verification layers: Layer 1 vs Layer 2</h2>
+
+<p>How do we guarantee that code, goldens, and schemas never diverge? The repository splits contract verification into two distinct layers.</p>
+
+<div class="pure">
+  <span class="label">Layer 1: Offline Schema Validation</span>
+  <p>Layer 1 tests the contract artifacts directly using <code>check-jsonschema</code>. It verifies that every golden example file in <code>examples/</code> strictly validates against its corresponding JSON Schema in <code>schemas/</code>. It runs fast, requires no Rust compilation, and executes in Git pre-push hooks and CI.</p>
+</div>
+
+<pre><code>#!/usr/bin/env bash
+# Layer 1 of issue #23: golden examples vs JSON Schemas.
+# This script is the pair registry. Call it from mise, hk pre-push, and CI.
+# Do not add logs.v1.txt (plain text). Do not close #23 on this check alone.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+if ! command -v check-jsonschema >/dev/null 2>&1; then
+  echo "check-jsonschema not on PATH. Run: mise install" >&2
+  exit 1
+fi
+
+check() {
+  local schema="$1"
+  local instance="$2"
+  echo "validate '${instance}' against '${schema}'"
+  check-jsonschema --schemafile "${schema}" "${instance}"
+}
+
+check schemas/status.v1.json examples/status.v1.json
+check schemas/config.v1.json examples/connections.json
+check schemas/doctor.v1.json examples/doctor.v1.json</code></pre>
+<p class="src">scripts/validate-contracts.sh:1–24</p>
+
+<div class="io">
+  <span class="label">Layer 2: Real Binary Stdout Proof</span>
+  <p>Layer 1 only proves that static JSON examples match the schema. It does not prove that the compiled Rust binary outputs valid JSON!</p>
+  <p><strong>Layer 2</strong> (implemented in <code>tests/cli_json_contracts.rs</code>) executes the actual compiled binary (via <code>CARGO_BIN_EXE_cloud-sql-tracker</code>), captures its live <code>stdout</code> for <code>status --json</code> and <code>doctor --json</code>, and validates the live output against the schemas using the <code>jsonschema</code> crate.</p>
+</div>
+
+<div class="trap">
+  <span class="label">Common Pitfall: In-process Serde Tests</span>
+  <p>Testing <code>serde_json::to_string(&amp;struct)</code> inside a unit test is <strong>not</strong> Layer 2 verification. In-process tests bypass CLI flag parsing, stdout pipe buffering, formatting wrappers, and real process exit paths. Only spawning the compiled executable proves the external contract.</p>
+</div>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>What are the three components of a Contract Trio, and what rule governs changes made to them?
+      <details><summary>Answer</summary><p>A Contract Trio consists of the prose document in docs/, the JSON Schema in schemas/, and the golden example in examples/. Any change to one must update all three together in the same pull request.</p></details>
+    </li>
+    <li>Why does the Status document contain both a <code>version</code> field and a <code>cli_version</code> field?
+      <details><summary>Answer</summary><p>The version field represents the integer schema format ID which only bumps on breaking schema changes. The cli_version field represents the semver release version of the compiled Rust binary.</p></details>
+    </li>
+    <li>Why is in-process <code>serde</code> serialization testing insufficient to satisfy Layer 2 contract verification?
+      <details><summary>Answer</summary><p>In-process serialization only tests Rust data structures in memory. Layer 2 executes the built binary as a real subprocess to validate that its actual stdout matches the JSON Schema under real runtime conditions.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/AGENTS.md">AGENTS.md ("Contract artifacts")</a> — the repository rules defining contract trios, versioning, and verification layers.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="03-the-shape.html">&larr; The shape</a>
+  <a href="../index.html">Contents</a>
+  <a href="05-model-and-config.html">The model and the config &rarr;</a>
+</nav>
+
+</body>
+</html>

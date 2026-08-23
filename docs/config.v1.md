@@ -119,7 +119,7 @@ These ports are **never** allowed in config:
 | **3306** | Default MySQL |
 | **1433** | Default SQL Server |
 
-Any other port in **1024–65535** is allowed (including the documented 15432+ Toolsense map).
+Any other port in **1024–65535** is allowed (including the documented 15432+ golden connection map).
 
 ### Uniqueness (hard errors)
 

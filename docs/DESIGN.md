@@ -52,7 +52,7 @@ Highlights:
 - `proxy_bin` resolved at start/doctor, not at parse time
 - Later: `cloud-sql-tracker config ...` CRUD
 
-## Ports (initial Toolsense map)
+## Ports (initial golden connection map)
 
 | id | port |
 |----|------|

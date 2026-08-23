@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>05. The model and the config — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part II &rsaquo; Chapter 05</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 05 &middot; Part II</p>
+  <h1>The model and the config</h1>
+  <p class="lede">Data types establish our shared domain vocabulary; strict parsing and layered validation guarantee that invalid configuration never reaches the runtime.</p>
+</header>
+
+<h2>Types before behavior</h2>
+
+<p>Every long-lived program develops a vocabulary. In poorly structured software, that vocabulary lives in ad-hoc strings, loose tuples, and scattered dictionary lookups. In <code>cloud-sql-tracker</code>, the vocabulary lives in <code>src/model.rs</code> as distinct Rust structs and enums.</p>
+
+<p>As established in <a href="02-the-language.html">Chapter 02</a>, domain terms like <a href="../reference/glossary.html#connection">Connection</a>, <a href="../reference/glossary.html#health-state">Health state</a>, and <a href="../reference/glossary.html#unit">Unit</a> are not loose abstractions. They are concrete types. <code>src/model.rs</code> contains no I/O, no network calls, and no CLI parsing logic. It is the single place in the codebase that pairs internal Rust data structures with their serialized wire representations.</p>
+
+<pre><code>/// One configured Cloud SQL instance plus its fixed local listen endpoint.
+///
+/// Fields after config merge (`docs/config.v1.md`, "Connection fields").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Connection {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) instance: String,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+    pub(crate) private_ip: bool,
+    pub(crate) auto_iam_authn: bool,
+    pub(crate) extra_args: Vec<String>,
+    pub(crate) enabled: bool,
+}</code></pre>
+<p class="src">src/model.rs:153–165</p>
+
+<div class="pure">
+  <span class="label">Pure Model Boundary</span>
+  <p>The <code>Connection</code> struct represents a fully validated, post-merge configuration target. Notice that every field is concrete—there are no optional values here. Missing optional fields from the user's config file have already been resolved into concrete defaults before a <code>Connection</code> instance is constructed.</p>
+</div>
+
+<p>The model also defines the orthogonal enums that express runtime observation and reporting:</p>
+
+<pre><code>/// A Connection's health, produced by Reconcile (`docs/reconcile.v1.md`).
+///
+/// Serializes to the Status document's lowercase `state` strings
+/// (`docs/status-document.v1.md`, "`state` (Health state)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum HealthState {
+    Stopped,
+    Starting,
+    Running,
+    Error,
+}
+
+/// Process ownership signal, orthogonal to [`HealthState`].
+///
+/// Only `unit` | `none` in v1 — there is no `orphan` Source
+/// (`CONTEXT.md`, "Source"; `docs/status-document.v1.md`, "source").
+///
+/// Serializes to the Status document's lowercase `source` strings
+/// (`docs/status-document.v1.md`, "`source` (ownership)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Source {
+    /// Process is the MainPID of our expected user Unit.
+    Unit,
+    /// No managed Unit process attributed.
+    None,
+}</code></pre>
+<p class="src">src/model.rs:172–198</p>
+
+<p>By separating <a href="../reference/glossary.html#health-state">HealthState</a> from <a href="../reference/glossary.html#source">Source</a>, the system avoids conflating <em>what the process is doing</em> (healthy TCP connection vs crash) with <em>who owns it</em> (our managed unit vs an unmanaged process). These types feed directly into the <a href="../reference/glossary.html#status-document">StatusDocument</a> structure:</p>
+
+<pre><code>/// One `connections[]` element of the Status document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct StatusRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) instance: String,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+    pub(crate) private_ip: bool,
+    pub(crate) enabled: bool,
+    pub(crate) state: HealthState,
+    pub(crate) source: Source,
+    pub(crate) pid: Option<u32>,
+    pub(crate) unit: Option<UnitName>,
+    pub(crate) port_open: bool,
+    pub(crate) uptime_sec: Option<u64>,
+    pub(crate) error: Option<StatusError>,
+}
+
+/// The `status --json` document (`docs/status-document.v1.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct StatusDocument {
+    pub(crate) version: u32,
+    pub(crate) ts: String,
+    pub(crate) cli_version: String,
+    pub(crate) running: u32,
+    pub(crate) starting: u32,
+    pub(crate) error: u32,
+    pub(crate) stopped: u32,
+    pub(crate) total: u32,
+    pub(crate) groups: std::collections::BTreeMap&lt;String, GroupCounts&gt;,
+    pub(crate) connections: Vec&lt;StatusRow&gt;,
+}</code></pre>
+<p class="src">src/model.rs:265–307</p>
+
+<h2>Naming systemd units safely</h2>
+
+<p>On Linux, systemd supervises background services using <strong>units</strong>—configuration entities that represent processes, sockets, or devices. A <strong>transient unit</strong> is a service unit created dynamically at runtime via systemd's D-Bus API rather than loaded from a static file on disk.</p>
+
+<p>Every connection managed by the CLI corresponds to one transient systemd user service named <code>cloud-sql-proxy-&lt;id&gt;.service</code>. To ensure that unit names are assembled consistently across all modules, <code>src/model.rs</code> encapsulates this logic in a transparent newtype, <code>UnitName</code>:</p>
+
+<pre><code>/// The systemd `--user` unit name for one Connection's managed Proxy process.
+///
+/// Always `cloud-sql-proxy-&lt;sanitized-id&gt;.service`. `supervisor`, `journal`,
+/// and the Status `unit` field all go through [`unit_name`] so the string is
+/// assembled in exactly one place.
+///
+/// `#[serde(transparent)]`: a `UnitName` is always a plain string on the
+/// wire (e.g. the Status document's `unit` field) — never the newtype
+/// wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub(crate) struct UnitName(String);
+
+impl UnitName {
+    pub(crate) fn as_str(&amp;self) -&gt; &amp;str {
+        &amp;self.0
+    }
+}
+
+const MAX_UNIT_NAME_LEN: usize = 255;
+
+/// The systemd `.service` unit name for a Connection id.
+pub(crate) fn unit_name(id: &amp;str) -&gt; Result&lt;UnitName, UnitNameError&gt; {
+    let core = if is_config_valid_id(id) {
+        id.to_string()
+    } else {
+        sanitize_unit_id(id)?
+    };
+    let name = format!("cloud-sql-proxy-{core}.service");
+    if name.len() &gt; MAX_UNIT_NAME_LEN {
+        return Err(UnitNameError::TooLong {
+            len: name.len(),
+            max: MAX_UNIT_NAME_LEN,
+        });
+    }
+    Ok(UnitName(name))
+}</code></pre>
+<p class="src">src/model.rs:20–70</p>
+
+<div class="why">
+  <span class="label">Why valid IDs are preserved without sanitization</span>
+  <p>A connection ID that satisfies the config rules (<code>^[a-zA-Z0-9][a-zA-Z0-9_-]*$</code>) is already valid in systemd unit names. If <code>unit_name()</code> unconditionally ran sanitization (such as collapsing repeated dashes), two distinct connection IDs like <code>fe--dev</code> and <code>fe-dev</code> would collapse into the exact same systemd unit name. Preserving valid IDs avoids namespace collisions.</p>
+</div>
+
+<h2>Finding and loading configuration</h2>
+
+<p>Configuration loading lives in <code>src/config.rs</code>. By default, the control plane looks for its configuration file under the standard XDG path:</p>
+
+<pre><code>/// `$XDG_CONFIG_HOME/cloud-sql-tracker/connections.json`, else
+/// `~/.config/cloud-sql-tracker/connections.json`.
+#[allow(dead_code)]
+pub(crate) fn default_path() -&gt; PathBuf {
+    let config_home = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".config"));
+    config_home
+        .join("cloud-sql-tracker")
+        .join("connections.json")
+}
+
+fn home_dir() -&gt; PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}</code></pre>
+<p class="src">src/config.rs:105–119</p>
+
+<p>The <code>load()</code> function performs file I/O, immediately delegating bytes to the pure <code>parse()</code> function:</p>
+
+<pre><code>/// Runtime Connection inventory after load, merge, and validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Config {
+    pub(crate) proxy_bin: String,
+    pub(crate) connections: Vec&lt;Connection&gt;,
+}
+
+/// Read `path` then [`parse`] its bytes.
+pub(crate) fn load(path: &amp;Path) -&gt; Result&lt;Config, ConfigError&gt; {
+    let bytes = std::fs::read(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse(&amp;bytes)
+}</code></pre>
+<p class="src">src/config.rs:24–65</p>
+
+<div class="note">
+  <span class="label">Pure Parsing Seam</span>
+  <p>Notice the architectural separation: <code>load()</code> handles the filesystem read, while <code>parse()</code> is completely pure. This allows every parsing and validation test in the test suite to run in memory without creating temporary files or touching disk.</p>
+</div>
+
+<h2>The 3-tier merge hierarchy</h2>
+
+<p>A user's <code>connections.json</code> configuration combines global defaults and per-connection overrides. To process this cleanly, <code>src/config.rs</code> defines raw deserialization structs using Serde's <code>deny_unknown_fields</code> attribute:</p>
+
+<pre><code>/// Raw shapes mirroring `schemas/config.v1.json`. Unknown keys are
+/// rejected at every level (`docs/config.v1.md`, "Strict keys").
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    version: i64,
+    proxy_bin: Option&lt;String&gt;,
+    defaults: Option&lt;RawDefaults&gt;,
+    connections: Vec&lt;RawConnection&gt;,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawDefaults {
+    address: Option&lt;String&gt;,
+    private_ip: Option&lt;bool&gt;,
+    auto_iam_authn: Option&lt;bool&gt;,
+    extra_args: Option&lt;Vec&lt;String&gt;&gt;,
+    enabled: Option&lt;bool&gt;,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConnection {
+    id: String,
+    name: String,
+    group: String,
+    instance: String,
+    port: u16,
+    address: Option&lt;String&gt;,
+    private_ip: Option&lt;bool&gt;,
+    auto_iam_authn: Option&lt;bool&gt;,
+    extra_args: Option&lt;Vec&lt;String&gt;&gt;,
+    enabled: Option&lt;bool&gt;,
+}</code></pre>
+<p class="src">src/config.rs:133–171</p>
+
+<p>Every connection undergoes a strict three-tier merge order:</p>
+
+<div class="diagram">
+Built-in Defaults (Hardcoded in binary)
+    │  address = "127.0.0.1", private_ip = false, auto_iam_authn = false, extra_args = [], enabled = true
+    ▼
+File-level Defaults (`defaults` block in JSON)
+    │  Overwrites built-in defaults with file-wide settings
+    ▼
+Connection Object (`connections[]` entry in JSON)
+    │  Overwrites file-level defaults with per-target specifics
+    ▼
+Final Validated Connection
+</div>
+
+<p>Here is how the merge is executed in Rust:</p>
+
+<pre><code>const DEFAULT_PROXY_BIN: &amp;str = "cloud-sql-proxy";
+const DEFAULT_ADDRESS: &amp;str = "127.0.0.1";
+
+/// Built-in defaults (`docs/config.v1.md`, "Built-in defaults") layered
+/// under file `defaults`, then the connection object (`docs/config.v1.md`,
+/// "Merge order"). Identity fields (`name`/`group`/`instance`/`port`) are
+/// already required directly on `raw`; only the optional fields merge.
+fn merge_connection(defaults: &amp;RawDefaults, raw: RawConnection) -&gt; Result&lt;Connection, ConfigError&gt; {
+    let id = raw.id;
+    validate_id(&amp;id).map_err(|reason| invalid(&amp;id, reason))?;
+    validate_instance(&amp;raw.instance).map_err(|reason| invalid(&amp;id, reason))?;
+    validate_port(raw.port).map_err(|reason| invalid(&amp;id, reason))?;
+
+    Ok(Connection {
+        id,
+        name: raw.name,
+        group: raw.group,
+        instance: raw.instance,
+        address: raw
+            .address
+            .or_else(|| defaults.address.clone())
+            .unwrap_or_else(|| DEFAULT_ADDRESS.to_string()),
+        port: raw.port,
+        private_ip: raw.private_ip.or(defaults.private_ip).unwrap_or(false),
+        auto_iam_authn: raw
+            .auto_iam_authn
+            .or(defaults.auto_iam_authn)
+            .unwrap_or(false),
+        extra_args: raw
+            .extra_args
+            .or_else(|| defaults.extra_args.clone())
+            .unwrap_or_default(),
+        enabled: raw.enabled.or(defaults.enabled).unwrap_or(true),
+    })
+}</code></pre>
+<p class="src">src/config.rs:173–204</p>
+
+<div class="trap">
+  <span class="label">Identity Fields Are Not Defaultable</span>
+  <p>Notice that <code>id</code>, <code>name</code>, <code>group</code>, <code>instance</code>, and <code>port</code> are required fields on <code>RawConnection</code> and do not exist on <code>RawDefaults</code>. Allowing identity fields in global defaults would make duplicate IDs and ports almost inevitable.</p>
+</div>
+
+<h2>Validation as a hard error</h2>
+
+<p>Silent configuration decay is a primary source of operational outages. If a configuration file contains a typo like <code>"prot": 15432</code>, a permissive parser might ignore it and fall back to default ports. <code>cloud-sql-tracker</code> enforces strict validation so that any ambiguity fails fast at load time with exit code 2.</p>
+
+<h3>1. Unknown fields are rejected</h3>
+<p>Because <code>RawConfig</code>, <code>RawDefaults</code>, and <code>RawConnection</code> all carry <code>#[serde(deny_unknown_fields)]</code>, any unrecognised JSON key triggers a deserialization failure immediately.</p>
+
+<h3>2. Format and shape checks</h3>
+<p>Each field is checked against exact domain constraints:</p>
+
+<pre><code>const RESERVED_PORTS: [u16; 3] = [1433, 3306, 5432];
+const MIN_UNPRIVILEGED_PORT: u16 = 1024;
+const MAX_ID_LEN: usize = 64;
+
+/// `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1-64 (`docs/config.v1.md`,
+/// "Connection fields").
+fn validate_id(id: &amp;str) -&gt; Result&lt;(), String&gt; {
+    let mut chars = id.chars();
+    let starts_alphanumeric = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    let rest_is_id_safe = chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if starts_alphanumeric && rest_is_id_safe && id.len() &lt;= MAX_ID_LEN {
+        Ok(())
+    } else {
+        Err(format!(
+            "id `{id}` must match ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ and be at most {MAX_ID_LEN} bytes"
+        ))
+    }
+}
+
+/// `project:region:instance` — three non-empty, whitespace-free segments
+/// (`docs/config.v1.md`, "Connection fields").
+fn validate_instance(instance: &amp;str) -&gt; Result&lt;(), String&gt; {
+    let segments: Vec&lt;&amp;str&gt; = instance.split(':').collect();
+    let shape_ok = segments.len() == 3
+        && segments
+            .iter()
+            .all(|segment| !segment.is_empty() &amp;&amp; !segment.chars().any(char::is_whitespace));
+    if shape_ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "instance `{instance}` must be project:region:instance (three non-empty segments)"
+        ))
+    }
+}
+
+/// 1024-65535, excluding the reserved set (`docs/config.v1.md`,
+/// "Reserved ports").
+fn validate_port(port: u16) -&gt; Result&lt;(), String&gt; {
+    if port &lt; MIN_UNPRIVILEGED_PORT {
+        Err(format!(
+            "port {port} is privileged (must be &gt;= {MIN_UNPRIVILEGED_PORT})"
+        ))
+    } else if RESERVED_PORTS.contains(&amp;port) {
+        Err(format!("port {port} is reserved"))
+    } else {
+        Ok(())
+    }
+}</code></pre>
+<p class="src">src/config.rs:211–255</p>
+
+<h3>3. Reserved port protection</h3>
+<p>Ports 1–1023 are privileged system ports. Ports <strong>5432</strong> (PostgreSQL), <strong>3306</strong> (MySQL), and <strong>1433</strong> (SQL Server) are the standard database ports. Why does the CLI forbid them? Because the entire purpose of <code>cloud-sql-tracker</code> is to provide stable, non-conflicting local proxies that do not collide with local Docker Compose stacks or native database engines running on their default ports.</p>
+
+<h3>4. Global uniqueness validation</h3>
+<p>Once all connections are parsed and merged, <code>src/config.rs</code> ensures that there are no duplicate IDs, local ports, or remote Cloud SQL instances across the entire file:</p>
+
+<pre><code>/// Unique `id`, `port`, and `instance` across the whole file
+/// (`docs/config.v1.md`, "Uniqueness").
+fn check_uniqueness(connections: &amp;[Connection]) -&gt; Result&lt;(), ConfigError&gt; {
+    let mut seen_ids = HashSet::new();
+    let mut seen_ports = HashSet::new();
+    let mut seen_instances = HashSet::new();
+
+    for connection in connections {
+        if !seen_ids.insert(connection.id.clone()) {
+            return Err(ConfigError::DuplicateId(connection.id.clone()));
+        }
+        if !seen_ports.insert(connection.port) {
+            return Err(ConfigError::DuplicatePort(connection.port));
+        }
+        if !seen_instances.insert(connection.instance.clone()) {
+            return Err(ConfigError::DuplicateInstance(connection.instance.clone()));
+        }
+    }
+    Ok(())
+}</code></pre>
+<p class="src">src/config.rs:257–275</p>
+
+<p>With parsing and validation complete, the rest of the codebase can work with a trusted <code>Config</code> struct, confident that all invariants hold without re-checking them at every step.</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>unit_name()</code> check <code>is_config_valid_id()</code> and bypass sanitization for valid IDs rather than running all IDs through character replacement and dash collapsing?
+      <details><summary>Answer</summary><p>A config-valid ID already meets all systemd naming requirements. Bypassing sanitization prevents distinct IDs like <code>a--b</code> and <code>a-b</code> from collapsing into the exact same systemd unit name and colliding.</p></details>
+    </li>
+    <li>Why are default database ports (5432, 3306, 1433) treated as reserved and rejected during port validation?
+      <details><summary>Answer</summary><p>Rejecting default database ports prevents proxy endpoints from colliding with local Docker Compose containers or native database servers that developers frequently run on default standard ports.</p></details>
+    </li>
+    <li>What is the three-layer merge hierarchy applied to optional connection fields, and why are identity fields excluded from the <code>defaults</code> object?
+      <details><summary>Answer</summary><p>Optional properties merge built-in defaults, then file-level <code>defaults</code>, then per-connection overrides. Identity fields like ID and port cannot be defaulted because each connection requires globally unique identity values.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/config.v1.md">docs/config.v1.md</a> and <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/schemas/config.v1.json">schemas/config.v1.json</a> — the canonical specification and JSON Schema defining all configuration and merge rules.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="04-contracts-first.html">&larr; Contracts first</a>
+  <a href="../index.html">Contents</a>
+  <a href="06-reconcile.html">Reconcile: the pure heart &rarr;</a>
+</nav>
+
+</body>
+</html>

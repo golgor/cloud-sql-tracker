@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01. The problem — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part I &rsaquo; Chapter 01</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 01 &middot; Part I</p>
+  <h1>The problem</h1>
+  <p class="lede">Understand the real-world operational friction that created cloud-sql-tracker, what this control plane owns, and what it deliberately delegates to Google.</p>
+</header>
+
+<h2>The developer desktop before this tool</h2>
+
+<p>Modern cloud development often requires connecting local development tools—like DBeaver, psql, and application servers—to several remote managed databases in Google Cloud SQL. Google provides an official tunneling binary called the <a href="../reference/glossary.html#proxy-process">Cloud SQL Auth Proxy</a> (<code>cloud-sql-proxy</code>), which establishes secure, authenticated, encrypted TCP tunnels to remote instances without requiring public IP allowlisting.</p>
+
+<p>In practice, developers typically manage these proxies through ad-hoc shell commands or one-line scripts:</p>
+
+<pre><code># Typical developer one-liner:
+cloud-sql-proxy my-project:europe-west1:backend-postgres-1</code></pre>
+
+<p>Running proxies this way introduces three severe operational pain points on a local Linux workstation:</p>
+
+<ol>
+  <li><strong>Port collisions on 5432:</strong> By default, each proxy instance binds to PostgreSQL's default port (<code>5432</code>), MySQL's (<code>3306</code>), or SQL Server's (<code>1433</code>). The moment a developer needs to connect to two databases at once—or runs local Docker Compose environments—the second proxy crashes with a port-binding error.</li>
+  <li><strong>No shared status surface:</strong> When a proxy runs in a hidden terminal tab, background script, or disconnected shell session, the operator has no single place to inspect which proxies are active, which ports they occupy, or why a database connection suddenly refused traffic.</li>
+  <li><strong>Unmanaged process lifecycles:</strong> Killing terminal windows or restarting the desktop shell often leaves orphan proxy processes running in the background, silently holding local ports and blocking subsequent start attempts.</li>
+</ol>
+
+<div class="why">
+  <span class="label">Why</span>
+  <p>Defaulting to port <code>5432</code> creates immediate friction in environments running local Docker containers. <strong>cloud-sql-tracker</strong> assigns a fixed, non-default port (such as <code>15432</code>, <code>15433</code>, <code>15434</code>) to every configured database connection, isolating cloud database tunnels from local container stacks.</p>
+</div>
+
+<h2>What cloud-sql-tracker owns (and refuses to own)</h2>
+
+<p>To solve this without creating unnecessary complexity, <strong>cloud-sql-tracker</strong> acts strictly as a <a href="../reference/glossary.html#control-plane">control plane</a>. It manages configuration, process supervision, health aggregation, and structured status reporting:</p>
+
+<div class="diagram">┌────────────────────────────────────────────────────────┐
+│ UI / Bar Plugin / Terminal Scripts                    │
+└───────────────────────────┬────────────────────────────┘
+                            │ argv + stdout JSON only
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ cloud-sql-tracker (Stateless Rust Control Plane)      │
+│  - Parses ~/.config/cloud-sql-tracker/connections.json │
+│  - Supervises systemd --user transient units           │
+│  - Emits versioned Status Document (status --json)     │
+└───────────────────────────┬────────────────────────────┘
+                            │ D-Bus / zbus
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│ systemd --user                                         │
+│  └─ cloud-sql-proxy-fe-dev.service                     │
+│      └─ exec: cloud-sql-proxy (Google Binary)          │
+└────────────────────────────────────────────────────────┘</div>
+
+<p>A few core concepts define this architecture:</p>
+
+<ul>
+  <li><strong>systemd unit:</strong> A configuration entity managed by systemd, Linux's system and service manager. Our proxies run as user-level services.</li>
+  <li><strong>transient unit:</strong> A dynamic systemd service created in-memory at runtime via D-Bus (<code>cloud-sql-proxy-&lt;id&gt;.service</code>) rather than written to persistent disk files in <code>~/.config/systemd/user/</code>.</li>
+  <li><strong>D-Bus:</strong> The standard Linux inter-process communication mechanism. The control plane communicates with systemd's user instance over D-Bus via the pure-Rust <code>zbus</code> crate.</li>
+  <li><strong>Application Default Credentials (ADC):</strong> Google's standard credential discovery pattern (usually initialized with <code>gcloud auth application-default login</code>), which the proxy binary requires to authenticate with Google APIs.</li>
+</ul>
+
+<div class="note">
+  <span class="label">The architectural boundary</span>
+  <p><strong>cloud-sql-tracker does not tunnel database traffic.</strong> Google's stock <code>cloud-sql-proxy</code> binary owns the data plane. The tracker only supervises the processes, verifies local listener availability, and formats status.</p>
+</div>
+
+<h2>The companion desktop plugin</h2>
+
+<p>The control plane was built to support both command-line terminal workflows and desktop panel integrations. The companion status bar widget (<a href="https://github.com/golgor/cloud-sql-tracker-oma-plugin">cloud-sql-tracker-oma-plugin</a>) lives in a completely separate repository designed for the <a href="https://omarchy.org/">Omarchy</a> desktop environment (built on Quickshell and QML).</p>
+
+<p>The separation is rigorous: the bar widget has <strong>no direct access to configuration files</strong> and maintains no internal process state. Every 1–2 seconds, the widget runs <code>cloud-sql-tracker status --json</code>, parses the stdout JSON stream, and renders active database groups. Clicking a toggle invokes <code>cloud-sql-tracker start &lt;id&gt;</code> or <code>cloud-sql-tracker stop &lt;id&gt;</code>.</p>
+
+<h2>Concrete anchor: the 7-connection configuration</h2>
+
+<p>To make the problem concrete, the repository includes a golden reference configuration representing seven real-world service databases grouped by team roles (<code>backend</code>, <code>fe</code> for frontend, and <code>iot</code>):</p>
+
+<pre><code>{
+  "version": 1,
+  "proxy_bin": "cloud-sql-proxy",
+  "defaults": {
+    "address": "127.0.0.1",
+    "private_ip": false,
+    "auto_iam_authn": false,
+    "extra_args": [],
+    "enabled": true
+  },
+  "connections": [
+    {
+      "id": "backend-dev",
+      "name": "Backend Dev",
+      "group": "backend",
+      "instance": "acme-dev:europe-west1:backend-db-1",
+      "port": 15432
+    },
+    {
+      "id": "backend-prod",
+      "name": "Backend Prod",
+      "group": "backend",
+      "instance": "acme-prod:europe-west1:backend-db-prod",
+      "port": 15433
+    },
+    {
+      "id": "fe-dev",
+      "name": "FE Dev",
+      "group": "fe",
+      "instance": "acme-dev:europe-west1:frontend-db-1",
+      "port": 15434
+    },
+    {
+      "id": "fe-prod",
+      "name": "FE Prod",
+      "group": "fe",
+      "instance": "acme-prod:europe-west1:frontend-db-replica",
+      "port": 15435
+    },
+    {
+      "id": "fe-rw-prod",
+      "name": "FE RW Prod",
+      "group": "fe",
+      "instance": "acme-prod:europe-west1:frontend-db-main",
+      "port": 15436
+    },
+    {
+      "id": "iot-dev",
+      "name": "IoT Dev",
+      "group": "iot",
+      "instance": "acme-iot-dev:europe-west1:iot-db-dev",
+      "port": 15437
+    },
+    {
+      "id": "iot-prod",
+      "name": "IoT Prod",
+      "group": "iot",
+      "instance": "acme-iot-prod:europe-west1:iot-db-prod",
+      "port": 15438
+    }
+  ]
+}</code></pre>
+<p class="src">examples/connections.json:1–48</p>
+
+<p>Every connection has an explicit local port starting at <code>15432</code>, avoiding collisions with any host service on port <code>5432</code>. Starting the <code>backend</code> group spawns two isolated systemd user services, each bound cleanly to its designated port.</p>
+
+<h2>Roadmap of this book</h2>
+
+<p>This textbook walks through every layer of the implementation, moving from architectural decisions down to pure algorithms, Linux kernel interfaces, and test guarantees:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Part</th>
+      <th>Chapter</th>
+      <th>Core Focus</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Part I &middot; Orientation</td>
+      <td>01. The Problem<br>02. The Language<br>03. The Shape</td>
+      <td>Why the tool exists, authoritative domain vocabulary, and the 4 Architecture Decision Records (ADRs).</td>
+    </tr>
+    <tr>
+      <td>Part II &middot; The Core</td>
+      <td>04. Contracts First<br>05. Model and Config<br>06. Reconcile</td>
+      <td>The schema-prose-golden trio, strict configuration parsing, and the pure reconciliation engine.</td>
+    </tr>
+    <tr>
+      <td>Part III &middot; The Edges</td>
+      <td>07. Supervisor<br>08. Smaller Adapters</td>
+      <td>Interfacing with systemd over D-Bus via zbus, TCP port observation, journal reading, and doctor checks.</td>
+    </tr>
+    <tr>
+      <td>Part IV &middot; Layers Above</td>
+      <td>09. Commands<br>10. The CLI Shell</td>
+      <td>Mutation logic, multi-target batch execution, two independent clocks, and clap command-line parsing.</td>
+    </tr>
+    <tr>
+      <td>Part V &middot; Proof &amp; Ops</td>
+      <td>11. Proving It Works<br>12. Shipping It</td>
+      <td>Layer 1 and Layer 2 contract testing, dogfooding gates, release profiles, and process shutdown semantics.</td>
+    </tr>
+  </tbody>
+</table>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does cloud-sql-tracker enforce non-default ports (like 15432) instead of defaulting to standard database ports like 5432?
+      <details><summary>Answer</summary><p>Default database ports like 5432 collide with local database instances or Docker Compose containers, and prevent running multiple cloud proxy instances simultaneously on one machine.</p></details>
+    </li>
+    <li>What is the division of responsibility between the data plane and the control plane in this system?
+      <details><summary>Answer</summary><p>The data plane is Google's official proxy binary which handles encrypted database tunneling, while the control plane is this CLI which supervises processes, checks ports, and aggregates status.</p></details>
+    </li>
+    <li>How does the Omarchy bar widget discover the status of active cloud SQL connections?
+      <details><summary>Answer</summary><p>The desktop widget periodically executes the CLI with the <code>status --json</code> flag and parses stdout JSON, without accessing configuration files or managing process lifecycles directly.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/docs/DESIGN.md">docs/DESIGN.md</a> &middot; The core architectural and operational requirements established during initial project design.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="../index.html">Contents</a>
+  <a href="02-the-language.html">02. The language &rarr;</a>
+</nav>
+
+</body>
+</html>

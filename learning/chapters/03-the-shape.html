@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03. The shape — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part I &rsaquo; Chapter 03</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 03 &middot; Part I</p>
+  <h1>The shape</h1>
+  <p class="lede">How a stateless command-line tool, Linux user services, and Google's auth proxy fit together — and the four architectural decisions that keep the design flat.</p>
+</header>
+
+<h2>The system at a glance</h2>
+
+<p>Before reading code, look at how control and data flow through the operating system. The program is not a daemon, not a background worker, and not a database driver. It is a short-lived control plane that runs for milliseconds, instructs the Linux service manager to start or stop proxies, inspects system state, and exits.</p>
+
+<div class="diagram">┌─────────────────────────┐     spawn / poll     ┌──────────────────────────┐
+│ Omarchy Quickshell bar  │ ───────────────────► │    cloud-sql-tracker     │
+│   (or Terminal / CI)    │ ◄──── JSON/status ── │ (stateless Rust binary)  │
+└─────────────────────────┘                      └────────────┬─────────────┘
+                                                              │
+                                                    D-Bus / zbus (user bus)
+                                                              │
+                                                              ▼
+                                               ┌──────────────────────────────┐
+                                               │ systemd --user               │
+                                               │ cloud-sql-proxy-<id>.service │
+                                               │ (transient Unit, 1 per DB)   │
+                                               └──────────────┬───────────────┘
+                                                              │
+                                                         spawns / supervises
+                                                              │
+                                                              ▼
+                                               ┌──────────────────────────────┐
+                                               │ Google cloud-sql-proxy (Go)  │
+                                               │   127.0.0.1:15432+           │
+                                               └──────────────────────────────┘</div>
+
+<p>Every long-lived process is Google's official <a href="../reference/glossary.html#proxy-process"><code>cloud-sql-proxy</code></a> binary. Each proxy instance is supervised by <a href="../reference/glossary.html#supervisor"><code>systemd --user</code></a> as a <a href="../reference/glossary.html#unit">transient service unit</a>. <code>cloud-sql-tracker</code> coordinates these units over <a href="../reference/glossary.html#d-bus">D-Bus</a>, probes local ports, and emits structured status for scripts and desktop bars.</p>
+
+<h2>The entry points</h2>
+
+<p>The entire binary entry point in <code>src/main.rs</code> is thirteen lines long. It does not contain command dispatch, argument parsing, or business logic. It invokes the library crate's command-line interface and exits with the returned status code.</p>
+
+<pre><code>//! cloud-sql-tracker — stateless control plane for cloud-sql-proxy processes.
+//!
+//! This binary does **not** implement the Cloud SQL tunnel. It starts, stops,
+//! and reports on Google's `cloud-sql-proxy`, driven by a user config file and
+//! systemd --user transient units.
+//!
+//! See README.md and docs/DESIGN.md. Behavior lives in the library crate
+//! (`src/lib.rs`); this binary is only `exit(cli::run())`
+//! (`docs/modules.v1.md`, "`cli` — thin shell (clap)").
+
+fn main() {
+    std::process::exit(cloud_sql_tracker::cli::run());
+}</code></pre>
+<p class="src">src/main.rs:1–13</p>
+
+<p>The library root in <code>src/lib.rs</code> exposes exactly one public module: <code>cli</code>. Every other module is internal to the crate, organized by clear architectural seams.</p>
+
+<pre><code>//! cloud-sql-tracker library crate.
+//!
+//! `src/main.rs` stays a thin binary; behavior lives in these modules.
+//! See `docs/modules.v1.md` for the frozen module seams.
+
+pub mod cli;
+mod commands;
+mod config;
+mod env;
+mod journal;
+mod model;
+mod port;
+mod reconcile;
+mod supervisor;</code></pre>
+<p class="src">src/lib.rs:1–14</p>
+
+<h2>Key Linux concepts for newcomers</h2>
+
+<p>If you have not written native Linux system utilities before, four terms appear throughout the codebase:</p>
+
+<dl>
+  <dt>systemd unit</dt>
+  <dd>A resource managed by Linux's system and service manager. Service units define how to launch an executable, restart policies, environment variables, stop timeouts, and cgroup tracking.</dd>
+
+  <dt>transient unit</dt>
+  <dd>A dynamically created, in-memory systemd service created at runtime over D-Bus (named like <code>cloud-sql-proxy-fe-dev.service</code>). It exists in memory (on a <code>tmpfs</code> filesystem under <code>/run/user/&lt;uid&gt;/</code>) without requiring persistent unit configuration files on disk.</dd>
+
+  <dt>D-Bus and the user bus</dt>
+  <dd>D-Bus is a standard Linux inter-process communication (IPC) system. The <strong>user bus</strong> is a per-login-session D-Bus daemon running under your unprivileged user account. Programs query properties and invoke methods on systemd's user manager without needing <code>sudo</code> or root privileges.</dd>
+
+  <dt>Application Default Credentials (ADC)</dt>
+  <dd>Google Cloud's standard credential discovery strategy. Client libraries and <code>cloud-sql-proxy</code> automatically read credentials from the <code>GOOGLE_APPLICATION_CREDENTIALS</code> environment variable or the default login file at <code>~/.config/gcloud/application_default_credentials.json</code> created by <code>gcloud auth application-default login</code>.</dd>
+</dl>
+
+<h2>The four Architecture Decision Records (ADRs)</h2>
+
+<p>Every non-obvious design choice in this project is captured in an Architecture Decision Record under <code>docs/adr/</code>. When in doubt about why something is built a certain way, consult these four ADRs.</p>
+
+<h3>ADR 0001: Stateless CLI over systemd --user</h3>
+
+<div class="why">
+  <span class="label">Decision</span>
+  <p><strong>Pick:</strong> A short-lived Rust CLI that communicates with <code>systemd --user</code> over D-Bus.<br>
+  <strong>Why:</strong> Survives desktop shell restarts, requires no background tracker daemon, and provides a single contract (<code>argv</code> + JSON) for terminals, scripts, and desktop plugins.<br>
+  <strong>Discarded:</strong> Process management inside the QML desktop bar; a persistent tracker background daemon.<br>
+  <strong>Unchanged:</strong> Google's <code>cloud-sql-proxy</code> remains the actual tunnel binary.</p>
+</div>
+
+<p>Why not manage proxy processes directly inside the desktop bar plugin? Quickshell and desktop bars restart whenever their configuration changes or the compositor reloads. If the bar owned the child process handles, restarting the bar would terminate every database tunnel mid-query.</p>
+
+<p>Why not run a long-lived <code>cloud-sql-tracker</code> daemon? A daemon introduces Unix domain socket IPC, state synchronisation bugs, daemon crash recovery, and the question of "who supervises the supervisor?" For ~7 proxy processes polled every few seconds, a stateless CLI that reads live operating system state is significantly simpler and more robust.</p>
+
+<h3>ADR 0002: ADC-only authentication</h3>
+
+<div class="why">
+  <span class="label">Decision</span>
+  <p><strong>Pick:</strong> Application Default Credentials (ADC) as a hard requirement.<br>
+  <strong>Why:</strong> Developers on Linux workstations already authenticate with Google Cloud using <code>gcloud auth application-default login</code>.<br>
+  <strong>Discarded:</strong> Custom OAuth token exchange, service account JSON key file management, and bespoke auth flags.<br>
+  <strong>Unchanged:</strong> The proxy binary handles all Google Cloud token refreshes natively.</p>
+</div>
+
+<p>The control plane forwards only the operator's <code>HOME</code> and optional <code>GOOGLE_APPLICATION_CREDENTIALS</code> environment variables into the transient systemd units. The <code>doctor</code> command treats missing or unreadable ADC credentials as a hard failure.</p>
+
+<h3>ADR 0003: Local health signals</h3>
+
+<div class="why">
+  <span class="label">Decision</span>
+  <p><strong>Pick:</strong> Health state is derived strictly from our systemd unit's state and a local TCP connect accept on <code>127.0.0.1:&lt;port&gt;</code>.<br>
+  <strong>Why:</strong> Connecting to the remote Cloud SQL database requires database credentials (passwords/IAM database users) that the control plane does not and should not hold.<br>
+  <strong>Discarded:</strong> Upstream database pings; proxy HTTP health check endpoints (which cause port collisions across multiple proxies in v1); orphan process adoption.<br>
+  <strong>Unchanged:</strong> Start commands verify local port readiness before returning.</p>
+</div>
+
+<p>If a proxy process is running on the configured port but was launched manually outside of our managed systemd unit, the control plane classifies it as a <a href="../reference/glossary.html#foreign-process">Foreign process</a> and reports a <code>port_conflict</code> error. It never silently adopts unmanaged processes.</p>
+
+<h3>ADR 0004: Native Linux I/O</h3>
+
+<div class="why">
+  <span class="label">Decision</span>
+  <p><strong>Pick:</strong> Native Rust crates and Linux APIs (<code>zbus</code> for D-Bus, <code>procfs</code> and <code>std::net::TcpStream</code> for sockets/processes).<br>
+  <strong>Why:</strong> Programmatic interfaces provide structured types and fail reliably, eliminating brittle scraping of shell pipelines like <code>ss</code>, <code>pgrep</code>, or <code>systemctl</code> stdout.<br>
+  <strong>Discarded:</strong> Shelling out to <code>systemctl</code> or <code>ss</code> for control and inspection.<br>
+  <strong>Unchanged:</strong> <code>journalctl</code> is still used for <code>cloud-sql-tracker logs</code> because formatted log extraction is journalctl's primary design.</p>
+</div>
+
+<h2>The zero-memory superpower</h2>
+
+<p>Notice what is missing from this project: there is no <code>state.json</code>, no SQLite database, and no cache directory. The control plane holds zero persistent memory across invocations.</p>
+
+<p>When you run <code>cloud-sql-tracker status --json</code>, it reads the static configuration file, inspects the live systemd user manager over D-Bus, probes the configured TCP ports, passes the observations through a pure reconciliation algorithm, outputs the resulting <a href="../reference/glossary.html#status-document">Status document</a>, and terminates.</p>
+
+<div class="note">
+  <span class="label">Resilience benefit</span>
+  <p>If the computer suffers an unexpected power loss, kernel crash, or hard shutdown, no cleanup is required on next boot. Transient unit definitions disappear automatically because they reside in memory (<code>tmpfs</code>). The next boot starts with a clean slate, and every connection is predictably reported as <code>stopped</code> until manually started.</p>
+</div>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>Why does <code>cloud-sql-tracker</code> supervise proxies via <code>systemd --user</code> instead of spawning them directly as child processes of the desktop bar plugin?
+      <details><summary>Answer</summary><p>Spawning proxies directly from the desktop bar would cause all database tunnels to crash whenever the UI reloads or the desktop compositor restarts. Supervising them under systemd isolates proxy lifetimes from UI lifecycles.</p></details>
+    </li>
+    <li>Why does the project refuse to adopt a running <code>cloud-sql-proxy</code> process that was launched outside of its managed systemd unit?
+      <details><summary>Answer</summary><p>An externally launched process has unverified launch flags and lacks systemd lifecycle supervision. Treating it as a foreign port conflict avoids subtle bugs caused by managing processes the control plane did not configure.</p></details>
+    </li>
+    <li>How does having zero persisted state files make the control plane resilient against sudden power failures or system crashes?
+      <details><summary>Answer</summary><p>Because transient unit state lives entirely in tmpfs and no state file is written, there is no corrupted or stale state to clean up after a hard reboot. The next run re-evaluates reality directly from the OS.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/tree/main/docs/adr">Architecture Decision Records (ADRs 0001–0004)</a> — the normative architectural decisions governing control plane lifecycle, auth, health, and Linux I/O.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="02-the-language.html">&larr; The language</a>
+  <a href="../index.html">Contents</a>
+  <a href="04-contracts-first.html">Contracts first &rarr;</a>
+</nav>
+
+</body>
+</html>

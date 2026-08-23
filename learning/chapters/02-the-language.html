@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>02. The language — cloud-sql-tracker</title>
+<link rel="stylesheet" href="../assets/textbook.css">
+</head>
+<body>
+
+<p class="crumb"><a href="../index.html">Contents</a> &rsaquo; Part I &rsaquo; Chapter 02</p>
+
+<header class="book-head">
+  <p class="kicker">Chapter 02 &middot; Part I</p>
+  <h1>The language</h1>
+  <p class="lede">Explore the authoritative domain vocabulary of cloud-sql-tracker and see how every concept maps directly to a concrete Rust type.</p>
+</header>
+
+<h2>Domain vocabulary as a system</h2>
+
+<p>In a systems control plane that coordinates Linux processes, ports, configuration files, and D-Bus interfaces, ambiguous terms cause architectural bugs. The file <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/CONTEXT.md"><code>CONTEXT.md</code></a> establishes the strict domain language of this project. Every term has a single specific meaning and maps 1:1 to a Rust struct, enum, or function.</p>
+
+<p>Here is the domain glossary as an interconnected system:</p>
+
+<dl>
+  <dt id="connection"><a href="../reference/glossary.html#connection">Connection</a></dt>
+  <dd><strong>Definition:</strong> One configured Cloud SQL instance plus its fixed local listen endpoint (id, name, group, instance connection name, port, and connection flags).<br>
+  <strong>Why:</strong> Distinguishes static configuration intent from any running process. In code: <code>struct Connection</code> in <code>src/model.rs:153</code>.</dd>
+
+  <dt id="proxy-process"><a href="../reference/glossary.html#proxy-process">Proxy process</a></dt>
+  <dd><strong>Definition:</strong> An active Linux operating system process running Google's <code>cloud-sql-proxy</code> executable on behalf of a Connection.<br>
+  <strong>Why:</strong> The proxy process is the actual data-plane runtime with an OS Process ID (PID). In code: tracked via <code>pid: Option&lt;u32&gt;</code> in <code>src/model.rs:276</code>.</dd>
+
+  <dt id="control-plane"><a href="../reference/glossary.html#control-plane">Control plane</a></dt>
+  <dd><strong>Definition:</strong> The short-lived <code>cloud-sql-tracker</code> CLI that starts, stops, reconciles, and reports on Proxy processes.<br>
+  <strong>Why:</strong> Separates lifecycle supervision and status reporting from the SQL data stream. In code: the <code>cloud_sql_tracker::cli</code> entrypoint in <code>src/main.rs:12</code>.</dd>
+
+  <dt id="status-document"><a href="../reference/glossary.html#status-document">Status document</a></dt>
+  <dd><strong>Definition:</strong> The complete, versioned JSON snapshot of all configured Connections and their computed health returned by <code>status --json</code>.<br>
+  <strong>Why:</strong> Provides an atomic, machine-readable contract for desktop UI widgets and automation scripts. In code: <code>struct StatusDocument</code> in <code>src/model.rs:294</code>.</dd>
+
+  <dt id="health-state"><a href="../reference/glossary.html#health-state">Health state</a></dt>
+  <dd><strong>Definition:</strong> One of four discrete operational states (<code>stopped</code>, <code>starting</code>, <code>running</code>, <code>error</code>) computed for a Connection at a single moment.<br>
+  <strong>Why:</strong> Eliminates fuzzy status descriptions and gives UIs a deterministic four-state model. In code: <code>enum HealthState</code> in <code>src/model.rs:172</code>.</dd>
+
+  <dt id="reconcile"><a href="../reference/glossary.html#reconcile">Reconcile</a></dt>
+  <dd><strong>Definition:</strong> The pure, side-effect-free function that maps observed operating system signals (systemd state and port probes) to a Connection's Health state.<br>
+  <strong>Why:</strong> Separates decision policy from Linux I/O, enabling exhaustive automated testing. In code: <code>fn reconcile()</code> in <code>src/reconcile.rs:102</code>.</dd>
+
+  <dt id="source"><a href="../reference/glossary.html#source">Source</a></dt>
+  <dd><strong>Definition:</strong> The process ownership provenance for a Connection's port (either <code>unit</code> if managed by our systemd service, or <code>none</code>).<br>
+  <strong>Why:</strong> Disentangles process health from process ownership. In code: <code>enum Source</code> in <code>src/model.rs:188</code>.</dd>
+
+  <dt id="foreign-process"><a href="../reference/glossary.html#foreign-process">Foreign process</a></dt>
+  <dd><strong>Definition:</strong> Any process holding a Connection's configured local port that is not our managed systemd Unit process.<br>
+  <strong>Why:</strong> Unmanaged listeners (including leftover manually run proxies or Docker containers) are classified as port conflicts (<code>error</code> / <code>port_in_use</code>), never adopted. In code: <code>ErrorCode::PortInUse</code> in <code>src/model.rs:236</code>.</dd>
+
+  <dt id="group"><a href="../reference/glossary.html#group">Group</a></dt>
+  <dd><strong>Definition:</strong> A logical category label assigned to Connections (such as <code>backend</code>, <code>fe</code>, or <code>iot</code>) for filtering and bulk start/stop operations.<br>
+  <strong>Why:</strong> Allows developers to toggle entire clusters of related microservice proxies with a single command (<code>start --group backend</code>). In code: <code>group: String</code> in <code>src/model.rs:156</code>.</dd>
+
+  <dt id="unit"><a href="../reference/glossary.html#unit">Unit</a></dt>
+  <dd><strong>Definition:</strong> The dynamic <code>systemd --user</code> transient service (named <code>cloud-sql-proxy-&lt;id&gt;.service</code>) supervising a single managed Proxy process.<br>
+  <strong>Why:</strong> Delegates process isolation, log capture, and clean signal termination to the Linux init system. In code: <code>struct UnitName</code> in <code>src/model.rs:18</code>.</dd>
+
+  <dt id="supervisor"><a href="../reference/glossary.html#supervisor">Supervisor</a></dt>
+  <dd><strong>Definition:</strong> The user session systemd daemon (<code>systemd --user</code>) communicating over D-Bus.<br>
+  <strong>Why:</strong> Serves as the actual long-lived process supervisor on Linux. In code: <code>src/supervisor.rs</code>.</dd>
+</dl>
+
+<h2>Concepts newcomers easily conflate</h2>
+
+<p>When studying this codebase, two distinctions are critical to avoid confusion:</p>
+
+<h3>1. Connection vs. Proxy process vs. Unit</h3>
+
+<div class="diagram">┌──────────────────────────────────────────────────────────┐
+│ Connection (Configuration entity in connections.json)   │
+│ id: "fe-dev", port: 15434, instance: "proj:region:inst"  │
+└────────────────────────────┬─────────────────────────────┘
+                             │ Managed by systemd
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│ Unit (Transient systemd service)                        │
+│ Name: "cloud-sql-proxy-fe-dev.service"                   │
+└────────────────────────────┬─────────────────────────────┘
+                             │ Spawns & monitors
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│ Proxy process (Operating system process running binary)  │
+│ Command: /usr/bin/cloud-sql-proxy ... (PID: 12450)       │
+└──────────────────────────────────────────────────────────┘</div>
+
+<p>These three represent three distinct layers of existence:</p>
+<ul>
+  <li>A <strong>Connection</strong> always exists as long as it is listed in <code>connections.json</code>, even when completely stopped.</li>
+  <li>A <strong>Unit</strong> only exists in systemd when the service is starting, active, or in a failed state.</li>
+  <li>A <strong>Proxy process</strong> is the physical OS process executing CPU instructions and holding a TCP socket.</li>
+</ul>
+
+<h3>2. Health state vs. Source</h3>
+
+<p>Newcomers often assume that if a local port is accepting TCP connections, the Connection must be in the <code>running</code> state. This is false. <code>HealthState</code> and <code>Source</code> are orthogonal dimensions:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Local Port 15434</th>
+      <th>Unit Main PID</th>
+      <th>HealthState</th>
+      <th>Source</th>
+      <th>Meaning</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Accepting TCP</td>
+      <td>Matches Listener PID</td>
+      <td><code>running</code></td>
+      <td><code>unit</code></td>
+      <td>Healthy managed proxy running normally.</td>
+    </tr>
+    <tr>
+      <td>Closed</td>
+      <td>None (Inactive)</td>
+      <td><code>stopped</code></td>
+      <td><code>none</code></td>
+      <td>Cleanly stopped connection.</td>
+    </tr>
+    <tr>
+      <td>Accepting TCP</td>
+      <td>No Unit / Wrong PID</td>
+      <td><code>error</code></td>
+      <td><code>none</code></td>
+      <td><strong>Port conflict!</strong> A foreign process (e.g. Docker or rogue proxy) holds the port.</td>
+    </tr>
+    <tr>
+      <td>Closed</td>
+      <td>Active Unit (within 10s)</td>
+      <td><code>starting</code></td>
+      <td><code>unit</code></td>
+      <td>Unit recently launched; waiting for proxy to bind port.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="trap">
+  <span class="label">Trap</span>
+  <p><strong>v1 never adopts orphan processes.</strong> If someone starts <code>cloud-sql-proxy</code> manually in a terminal tab on port 15434, cloud-sql-tracker will <em>not</em> claim ownership of it. It classifies the connection as <code>state: error</code> with <code>error.code: port_in_use</code> and <code>source: none</code>.</p>
+</div>
+
+<h2>Rust type mappings in src/model.rs</h2>
+
+<p>The domain language translates directly into Rust data structures. Notice how strict typing and Serde attributes enforce the system contract:</p>
+
+<h3>1. Connection</h3>
+
+<pre><code>/// One configured Cloud SQL instance plus its fixed local listen endpoint.
+///
+/// Fields after config merge (`docs/config.v1.md`, "Connection fields").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Connection {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) instance: String,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+    pub(crate) private_ip: bool,
+    pub(crate) auto_iam_authn: bool,
+    pub(crate) extra_args: Vec<String>,
+    pub(crate) enabled: bool,
+}</code></pre>
+<p class="src">src/model.rs:150–164</p>
+
+<h3>2. HealthState and Source</h3>
+
+<pre><code>/// A Connection's health, produced by Reconcile (`docs/reconcile.v1.md`).
+///
+/// Serializes to the Status document's lowercase `state` strings
+/// (`docs/status-document.v1.md`, "`state` (Health state)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum HealthState {
+    Stopped,
+    Starting,
+    Running,
+    Error,
+}
+
+/// Process ownership signal, orthogonal to [`HealthState`].
+///
+/// Only `unit` | `none` in v1 — there is no `orphan` Source
+/// (`CONTEXT.md`, "Source"; `docs/status-document.v1.md`, "source").
+///
+/// Serializes to the Status document's lowercase `source` strings
+/// (`docs/status-document.v1.md`, "`source` (ownership)").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Source {
+    /// Process is the MainPID of our expected user Unit.
+    Unit,
+    /// No managed Unit process attributed.
+    None,
+}</code></pre>
+<p class="src">src/model.rs:166–193</p>
+
+<h3>3. StatusRow</h3>
+
+<p>When the control plane reconciles all signals for a single Connection, it emits a <code>StatusRow</code> combining identity, health, ownership, and port diagnostics:</p>
+
+<pre><code>/// One `connections[]` element of the Status document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct StatusRow {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) instance: String,
+    pub(crate) address: String,
+    pub(crate) port: u16,
+    pub(crate) private_ip: bool,
+    pub(crate) enabled: bool,
+    pub(crate) state: HealthState,
+    pub(crate) source: Source,
+    pub(crate) pid: Option<u32>,
+    pub(crate) unit: Option<UnitName>,
+    pub(crate) port_open: bool,
+    pub(crate) uptime_sec: Option<u64>,
+    pub(crate) error: Option<StatusError>,
+}</code></pre>
+<p class="src">src/model.rs:264–281</p>
+
+<section class="check">
+  <h2>Check yourself</h2>
+  <ol>
+    <li>What is the fundamental difference between a Connection, a Unit, and a Proxy process?
+      <details><summary>Answer</summary><p>A Connection is static configuration data in JSON, a Unit is systemd's transient service wrapper, and a Proxy process is the running OS executable with a physical process ID.</p></details>
+    </li>
+    <li>Why are Health state and Source represented as two separate fields on a StatusRow rather than a single combined enum?
+      <details><summary>Answer</summary><p>They are orthogonal concepts: Health state describes whether the local endpoint accepts connections, while Source indicates whether that listener is owned by our managed systemd unit or unmanaged.</p></details>
+    </li>
+    <li>What is a Foreign process, and why does the v1 control plane refuse to adopt it into an active Source?
+      <details><summary>Answer</summary><p>A Foreign process is any unmanaged process holding a configured port; adopting it would create subtle process lifecycle bugs and hide port conflicts caused by rogue processes or local containers.</p></details>
+    </li>
+  </ol>
+</section>
+
+<footer class="book-foot">
+  <p><strong>Primary source:</strong> <a href="https://github.com/golgor/cloud-sql-tracker/blob/main/CONTEXT.md">CONTEXT.md</a> &middot; The normative dictionary of domain concepts and terms across the cloud-sql-tracker control plane.</p>
+  <p>Stuck, or something here felt hand-wavy? Ask your teacher — that is what I am for. Corrections welcome; this book should match the code.</p>
+</footer>
+
+<nav class="chapter-nav">
+  <a href="01-the-problem.html">&larr; 01. The problem</a>
+  <a href="../index.html">Contents</a>
+  <a href="03-the-shape.html">03. The shape &rarr;</a>
+</nav>
+
+</body>
+</html>
