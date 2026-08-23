@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "cli_version": "0.1.0",
+  "cli_version": "0.1.1",
   "ok": false,
   "checks": [
     {
@@ -25,7 +25,7 @@
       "id": "adc",
       "status": "fail",
       "detail": "no Application Default Credentials file at ~/.config/gcloud/application_default_credentials.json and GOOGLE_APPLICATION_CREDENTIALS is unset",
-      "hint": "Run: gcloud auth application-default login — see https://cloud.google.com/docs/authentication/provide-credentials-adc"
+      "hint": "Run: gcloud auth application-default login \u2014 see https://cloud.google.com/docs/authentication/provide-credentials-adc"
     },
     {
       "id": "journal_user",

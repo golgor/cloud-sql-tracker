@@ -31,7 +31,7 @@ This document is the **argv contract**. Field meanings inside `status --json` li
 
 ```text
 $ cloud-sql-tracker --version
-0.1.0
+0.1.1
 ```
 
 - Exactly one line on stdout, no `v` prefix, no binary name.

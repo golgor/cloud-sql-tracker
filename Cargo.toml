@@ -1,6 +1,6 @@
 [package]
 name = "cloud-sql-tracker"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.97.1"
 description = "Control plane for multiple Google Cloud SQL Auth Proxy processes"

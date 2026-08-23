@@ -12,7 +12,7 @@ cloud-sql-tracker stop --group backend
 
 ## Status
 
-**Contracts locking via PRs.** Binary still a stub (`0.1.0` in `Cargo.toml` only — single version source).
+**Contracts locking via PRs.** Binary version is `Cargo.toml` `[package].version` only (currently `0.1.1`).
 
 ## Develop
 
@@ -67,7 +67,7 @@ Pinned tag (after a release exists):
 
 ```bash
 cargo install --git https://github.com/golgor/cloud-sql-tracker \
-  --tag v0.1.0 --locked
+  --tag v0.1.1 --locked
 ```
 
 ### From a GitHub Release (Linux x86_64)
@@ -78,8 +78,8 @@ Each tag `vX.Y.Z` (matching `Cargo.toml` `[package].version`) publishes a Releas
 - `SHA256SUMS`
 
 ```bash
-# example for v0.1.0 — replace the version to match the Release
-VERSION=0.1.0
+# example for v0.1.1 — replace the version to match the Release
+VERSION=0.1.1
 ARCHIVE=cloud-sql-tracker-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz
 
 curl -fsSL -O "https://github.com/golgor/cloud-sql-tracker/releases/download/v${VERSION}/${ARCHIVE}"
