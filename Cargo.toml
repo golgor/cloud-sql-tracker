@@ -13,12 +13,12 @@ categories = ["command-line-utilities"]
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 procfs = { version = "0.18", default-features = false }
-# `time` feature only: `clock_gettime(ClockId::Monotonic)` for
-# `commands::status`'s Unit-start-age math (`docs/research/supervisor-io.md`,
-# "Use monotonic start time for Reconcile"). Already a transitive dependency
-# of `zbus`/`procfs`; this adds no new crate to the tree.
-# `time` for status Unit-start-age; `process` for doctor proxy -v timeout
-# (kill the probe's process group so shell helpers die with the parent).
+# `time`: `clock_gettime(ClockId::Monotonic)` for `commands::status`'s
+# Unit-start-age math (`docs/research/supervisor-io.md`, "Use monotonic
+# start time for Reconcile"). Already a transitive dependency of
+# `zbus`/`procfs`, so `time` alone adds no new crate to the tree.
+# `process`: kill the doctor `proxy_bin` version-probe's process group on
+# timeout, so a wrapper script's shell helpers (e.g. `sleep`) die too.
 rustix = { version = "1", default-features = false, features = ["time", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
