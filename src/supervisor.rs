@@ -435,7 +435,7 @@ pub(crate) fn systemd_user_check() -> CheckRow {
             "systemd_user",
             CheckStatus::Pass,
             format!("user bus ok (systemd {version})"),
-            None::<&str>,
+            None,
         ),
         Err(err) => CheckRow::new(
             "systemd_user",

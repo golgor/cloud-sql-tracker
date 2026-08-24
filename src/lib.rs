@@ -13,7 +13,7 @@ mod commands;
 mod config;
 mod env;
 mod journal;
-pub mod model;
+mod model;
 mod port;
 mod reconcile;
 mod supervisor;

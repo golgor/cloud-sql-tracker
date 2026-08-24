@@ -45,7 +45,7 @@ Independent from Status document `version` and from binary `cli_version`.
 
 - **Bump config `version`** when required fields change meaning, known keys are removed/renamed, or validation becomes incompatible.
 - Adding a **new optional known key** in a later config schema version is a deliberate schema bump (v1 is **closed** to unknown keys — see below).
-- Four validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
+- Validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
 
 ---
 
@@ -113,24 +113,23 @@ All config strings use **printable ASCII** bytes `0x20` through `0x7E` (`name`, 
 
 ### Decision: stricter field validation keeps schema version 1
 
-This change makes four inputs newly invalid. Each did load before this
-change:
+Validation tightenings make these inputs newly invalid:
 
 - `group` that starts with `-`.
 - `name: ""` (empty string).
 - `address: ""` (empty string), including `defaults.address: ""`.
 - More than 32 Connections in the `connections` array.
+- Non-printable ASCII characters in string fields. All string fields require printable ASCII (`0x20`–`0x7E`).
+- String values exceeding byte caps (`id` 64 B, `name` 64 B, `group` 32 B, `instance` 256 B, `address` 253 B, `proxy_bin` 4095 B).
+- `extra_args` exceeding 16 elements or 2048 total bytes across all elements.
 
 **Pick:** `version` stays `1`.
 
-**Why:** the project is still in development (pre-1.0). A stricter rule on
-an already-required field is not a new shape.
+**Why:** The project is in early development. Stricter validation on existing fields prevents invalid data without changing the document shape.
 
-**Discarded:** bump to `version: 2`. Rejected because the project is
-pre-1.0 and still in development.
+**Discarded:** Bump config schema to `version: 2`. Bump is not necessary for stricter validation in pre-1.0 development.
 
-**Unchanged:** the `status --json` document shape and the defaults merge
-order are not affected.
+**Unchanged:** The `status --json` document shape and the defaults merge order do not change.
 
 ### Reserved ports (hard errors)
 

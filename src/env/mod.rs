@@ -81,7 +81,7 @@ fn check_row_for_proxy_bin_probe(
             "proxy_bin",
             CheckStatus::Pass,
             format_proxy_bin_pass_detail(path, &version),
-            None::<&str>,
+            None,
         ),
         Err(err) => CheckRow::new(
             "proxy_bin",
@@ -221,7 +221,7 @@ fn check_row_for_adc(status: AdcStatus) -> CheckRow {
             id,
             CheckStatus::Pass,
             display_path(status.path.as_deref()),
-            None::<&str>,
+            None,
         );
     }
 

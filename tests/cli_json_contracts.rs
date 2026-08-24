@@ -442,148 +442,11 @@ fn unknown_top_level_key_is_rejected_by_the_schema_and_the_binary() {
 }
 
 // ---------------------------------------------------------------------------
-// Conservative hard upper-bound pure model serialization proofs
+// Layer 2 built-binary fixture proofs (maximum config input coverage)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn status_json_fieldwise_maximum_document_stays_under_cap() {
-    use cloud_sql_tracker::model::*;
-
-    // Fieldwise maximum StatusDocument upper-bound fixture:
-    // 32 rows, max fields, 32 max-length groups, max unit/pid/uptime,
-    // and every row containing a 512-byte control-character detail (\x01)
-    // which expands 6x (3072 bytes) in JSON escaping.
-    let mut groups = std::collections::BTreeMap::new();
-    for i in 0..32 {
-        let group_key = format!("g{:031}", i);
-        assert_eq!(group_key.len(), 32);
-        groups.insert(
-            group_key,
-            GroupCounts {
-                running: 0,
-                starting: 0,
-                error: 1,
-                stopped: 0,
-                total: 1,
-            },
-        );
-    }
-
-    let mut connections = Vec::with_capacity(32);
-    for i in 0..32 {
-        let id = format!("c{i:063}");
-        assert_eq!(id.len(), 64);
-        let name = format!("\"\\{}", "a".repeat(62));
-        assert_eq!(name.len(), 64);
-        let group = format!("g{:031}", i);
-        assert_eq!(group.len(), 32);
-        let instance = format!("proj:reg{i}:{}", "i".repeat(256 - 9 - format!("{i}").len()));
-        assert_eq!(instance.len(), 256);
-        let address = "1".repeat(253);
-        assert_eq!(address.len(), 253);
-
-        connections.push(StatusRow {
-            id: id.clone(),
-            name,
-            group,
-            instance,
-            address,
-            port: 65535,
-            private_ip: true,
-            enabled: true,
-            state: HealthState::Error,
-            source: Source::Unit,
-            pid: Some(4194304),
-            unit: unit_name(&id).ok(),
-            port_open: true,
-            uptime_sec: Some(u64::MAX),
-            error: Some(StatusError {
-                code: ErrorCode::Unknown,
-                detail: "\x01".repeat(512),
-            }),
-        });
-    }
-
-    let max_doc = StatusDocument {
-        version: 1,
-        ts: "2026-08-24T12:00:00Z".to_string(),
-        cli_version: "0.1.0".to_string(),
-        running: 0,
-        starting: 0,
-        error: 32,
-        stopped: 0,
-        total: 32,
-        groups,
-        connections,
-    };
-
-    let text = serde_json::to_string_pretty(&max_doc).expect("serialize StatusDocument");
-    let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
-    assert_validates("schemas/status.v1.json", &json_val);
-
-    let stdout_bytes = text.as_bytes();
-    assert!(
-        stdout_bytes.len() <= 262_144,
-        "fieldwise maximum status JSON length {} exceeds cap 262144",
-        stdout_bytes.len()
-    );
-    eprintln!(
-        "MEASURED: fieldwise conservative hard upper-bound status JSON size: {} bytes (cap: 262144)",
-        stdout_bytes.len()
-    );
-}
-
-#[test]
-fn doctor_json_fieldwise_maximum_report_stays_under_cap() {
-    use cloud_sql_tracker::model::*;
-
-    let check_ids = [
-        "config",
-        "proxy_bin",
-        "systemd_user",
-        "adc",
-        "journal_user",
-        "ports",
-    ];
-    let checks = check_ids
-        .iter()
-        .map(|id| CheckRow {
-            id: id.to_string(),
-            status: CheckStatus::Fail,
-            detail: "\x01".repeat(512),
-            hint: Some("\x01".repeat(512)),
-        })
-        .collect();
-
-    let max_report = DoctorReport {
-        version: 1,
-        cli_version: "0.1.0".to_string(),
-        ok: false,
-        checks,
-    };
-
-    let text = serde_json::to_string_pretty(&max_report).expect("serialize DoctorReport");
-    let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
-    assert_validates("schemas/doctor.v1.json", &json_val);
-
-    let stdout_bytes = text.as_bytes();
-    assert!(
-        stdout_bytes.len() <= 65_536,
-        "fieldwise maximum doctor JSON length {} exceeds cap 65536",
-        stdout_bytes.len()
-    );
-    eprintln!(
-        "MEASURED: fieldwise conservative hard upper-bound Doctor JSON size: {} bytes (cap: 65536)",
-        stdout_bytes.len()
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Layer 2 built-binary fixture proofs
-// ---------------------------------------------------------------------------
-
-#[test]
-fn status_json_stdout_32_row_observed_binary_config_fixture_stays_under_cap() {
+fn status_json_stdout_32_row_max_config_input_coverage_stays_under_cap() {
     let rows: Vec<String> = (0..32)
         .map(|i| {
             let id = format!("c{i:063}");
@@ -647,7 +510,7 @@ fn status_json_stdout_32_row_observed_binary_config_fixture_stays_under_cap() {
 }
 
 #[test]
-fn doctor_json_stdout_observed_binary_fixture_stays_under_cap() {
+fn doctor_json_stdout_max_config_input_coverage_stays_under_cap() {
     let long_path_dir = "d".repeat(200);
     let config = ConfigFixture::write(EMPTY_CONFIG);
     let path_with_long_dir = config

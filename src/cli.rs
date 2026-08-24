@@ -45,11 +45,6 @@ use crate::model::{
     self, CheckStatus, DoctorReport, ErrorCode, HealthState, Source, StatusDocument,
 };
 
-#[cfg(test)]
-pub mod model_for_tests {
-    pub use crate::model::*;
-}
-
 /// Output caps (`docs/cli-contract.v1.md`).
 const STATUS_MAX_BYTES: usize = 262_144; // 256 KiB
 const DOCTOR_MAX_BYTES: usize = 65_536; // 64 KiB
@@ -299,14 +294,12 @@ fn write_status_json<W: std::io::Write>(
     document: &StatusDocument,
     mut writer: W,
 ) -> Result<(), OutputCapError> {
-    let text = serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
+    let mut text =
+        serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
+    text.push('\n');
     let bytes = text.as_bytes();
     if bytes.len() <= STATUS_MAX_BYTES {
         writer.write_all(bytes).expect("stdout write succeeds");
-        assert!(
-            bytes.len() <= STATUS_MAX_BYTES,
-            "stdout output invariant violated"
-        );
         Ok(())
     } else {
         eprintln!(
@@ -542,14 +535,11 @@ fn write_doctor_json<W: std::io::Write>(
     report: &DoctorReport,
     mut writer: W,
 ) -> Result<(), OutputCapError> {
-    let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+    let mut text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+    text.push('\n');
     let bytes = text.as_bytes();
     if bytes.len() <= DOCTOR_MAX_BYTES {
         writer.write_all(bytes).expect("stdout write succeeds");
-        assert!(
-            bytes.len() <= DOCTOR_MAX_BYTES,
-            "stdout output invariant violated"
-        );
         Ok(())
     } else {
         eprintln!(
@@ -851,13 +841,45 @@ mod tests {
             version: 1,
             cli_version: "0.1.0".to_string(),
             ok: true,
-            checks: vec![model::CheckRow {
-                id: "test".to_string(),
-                status: model::CheckStatus::Pass,
-                // Direct construction bypassing clamp for test of stdout guard
-                detail: "d".repeat(70_000),
-                hint: None,
-            }],
+            checks: [
+                model::CheckRow {
+                    id: "test".to_string(),
+                    status: model::CheckStatus::Pass,
+                    // Direct construction bypassing clamp for test of stdout guard
+                    detail: "d".repeat(70_000),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c2".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c3".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c4".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c5".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c6".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+            ],
         };
 
         let mut buf = Vec::new();
@@ -871,6 +893,179 @@ mod tests {
         assert!(
             buf.is_empty(),
             "rejected over-cap report must write zero bytes to supplied writer"
+        );
+    }
+
+    #[test]
+    fn status_json_fieldwise_maximum_document_stays_under_cap() {
+        use model::*;
+
+        let mut groups = std::collections::BTreeMap::new();
+        for i in 0..32 {
+            let group_key = format!(
+                "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"g{:02}",
+                i
+            );
+            assert_eq!(group_key.len(), 32);
+            groups.insert(
+                group_key,
+                GroupCounts {
+                    running: 0,
+                    starting: 0,
+                    error: 1,
+                    stopped: 0,
+                    total: 1,
+                },
+            );
+        }
+
+        let mut connections = Vec::with_capacity(32);
+        for i in 0..32 {
+            let id = format!("c{i:063}");
+            assert_eq!(id.len(), 64);
+            let name = "\"\\".repeat(32);
+            assert_eq!(name.len(), 64);
+            let group = format!(
+                "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"g{:02}",
+                i
+            );
+            assert_eq!(group.len(), 32);
+            let instance = format!("\"\"\"\"\"\"\"\"\"\":reg:{}", "\"".repeat(241));
+            assert_eq!(instance.len(), 256);
+            assert_eq!(instance.len(), 256);
+            let address = format!("{}\"", "\"\\".repeat(126));
+            assert_eq!(address.len(), 253);
+
+            connections.push(StatusRow {
+                id: id.clone(),
+                name,
+                group,
+                instance,
+                address,
+                port: 65535,
+                private_ip: true,
+                enabled: true,
+                state: HealthState::Error,
+                source: Source::Unit,
+                pid: Some(u32::MAX),
+                unit: unit_name(&id).ok(),
+                port_open: true,
+                uptime_sec: Some(u64::MAX),
+                error: Some(StatusError {
+                    code: ErrorCode::Unknown,
+                    detail: "\x01".repeat(512),
+                }),
+            });
+        }
+
+        let cli_version = format!("0.1.0-{}", "a".repeat(58));
+        assert_eq!(cli_version.len(), 64);
+
+        let max_doc = StatusDocument {
+            version: 1,
+            ts: "2026-08-24T12:00:00.000000000Z".to_string(),
+            cli_version,
+            running: 0,
+            starting: 0,
+            error: 32,
+            stopped: 0,
+            total: 32,
+            groups,
+            connections,
+        };
+
+        let mut text = serde_json::to_string_pretty(&max_doc).expect("serialize StatusDocument");
+        text.push('\n');
+        let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/status.v1.json");
+        let schema_text = std::fs::read_to_string(schema_path).expect("read the status schema");
+        let schema: serde_json::Value =
+            serde_json::from_str(&schema_text).expect("parse the status schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile the status schema");
+        let errors: Vec<String> = validator
+            .iter_errors(&json_val)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "status schema validation errors: {errors:?}"
+        );
+
+        let stdout_bytes = text.as_bytes();
+        assert!(
+            stdout_bytes.len() <= STATUS_MAX_BYTES,
+            "fieldwise maximum status JSON length {} exceeds cap {}",
+            stdout_bytes.len(),
+            STATUS_MAX_BYTES
+        );
+        eprintln!(
+            "MEASURED: fieldwise conservative hard upper-bound status JSON size: {} bytes (cap: {})",
+            stdout_bytes.len(),
+            STATUS_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn doctor_json_fieldwise_maximum_report_stays_under_cap() {
+        use model::*;
+
+        let check_ids = [
+            "config",
+            "proxy_bin",
+            "systemd_user",
+            "adc",
+            "journal_user",
+            "ports",
+        ];
+        let checks: [CheckRow; 6] = std::array::from_fn(|i| CheckRow {
+            id: check_ids[i].to_string(),
+            status: CheckStatus::Fail,
+            detail: "\x01".repeat(512),
+            hint: Some("\x01".repeat(512)),
+        });
+
+        let cli_version = format!("0.1.0-{}", "a".repeat(58));
+        assert_eq!(cli_version.len(), 64);
+
+        let max_report = DoctorReport {
+            version: 1,
+            cli_version,
+            ok: false,
+            checks,
+        };
+
+        let mut text = serde_json::to_string_pretty(&max_report).expect("serialize DoctorReport");
+        text.push('\n');
+        let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/doctor.v1.json");
+        let schema_text = std::fs::read_to_string(schema_path).expect("read the doctor schema");
+        let schema: serde_json::Value =
+            serde_json::from_str(&schema_text).expect("parse the doctor schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile the doctor schema");
+        let errors: Vec<String> = validator
+            .iter_errors(&json_val)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "doctor schema validation errors: {errors:?}"
+        );
+
+        let stdout_bytes = text.as_bytes();
+        assert!(
+            stdout_bytes.len() <= DOCTOR_MAX_BYTES,
+            "fieldwise maximum doctor JSON length {} exceeds cap {}",
+            stdout_bytes.len(),
+            DOCTOR_MAX_BYTES
+        );
+        eprintln!(
+            "MEASURED: fieldwise conservative hard upper-bound Doctor JSON size: {} bytes (cap: {})",
+            stdout_bytes.len(),
+            DOCTOR_MAX_BYTES
         );
     }
 }

@@ -228,7 +228,7 @@ cloud-sql-tracker doctor [--json]
 - `status --json`: maximum **256 KiB** (262,144 bytes).
 - `doctor --json`: maximum **64 KiB** (65,536 bytes).
 
-If `status --json` or `doctor --json` exceeds its output cap during final serialization, the CLI writes **no JSON** to stdout, prints an error message to stderr, and exits **3** (Dependency / environmental backstop).
+Caps are measured on total UTF-8 bytes actually emitted to stdout, including the final trailing newline (`\n`). If `status --json` or `doctor --json` exceeds its output cap during final serialization, the CLI writes **no JSON** to stdout, prints an error message to stderr, and exits **3** (Dependency / environmental backstop).
 
 Note that `doctor --json` returns exit code **3** both when any check fails (`ok: false`) and when the report breaches its output cap. A consumer distinguishes an output cap breach from a check failure by stdout: cap breach produces empty stdout, whereas check failure outputs the JSON report.
 

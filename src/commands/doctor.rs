@@ -23,8 +23,6 @@ use crate::model::{
 use crate::supervisor::{self, UnitSnapshot};
 use crate::{env, journal, port};
 
-pub(crate) const MAX_DOCTOR_CHECKS: usize = 6;
-
 /// Run every Doctor check for the config at `cfg_path`
 /// (`docs/doctor.v1.md`, "Recommended check order"). `cli` (#45) resolves
 /// `cfg_path` (`--config` or the default XDG path) before calling this.
@@ -41,7 +39,7 @@ pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
     let loaded = config::load(cfg_path);
     let config = loaded.as_ref().ok();
 
-    let checks = vec![
+    let checks = [
         config_check(cfg_path, &loaded),
         env::proxy_bin_check(config.map(|config| config.proxy_bin.as_str())),
         supervisor::systemd_user_check(),
@@ -49,11 +47,6 @@ pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
         journal::journal_user_check(),
         ports_check(config),
     ];
-    assert!(
-        checks.len() <= MAX_DOCTOR_CHECKS,
-        "Doctor report checks count ({}) exceeds maximum ({MAX_DOCTOR_CHECKS})",
-        checks.len()
-    );
     let ok = all_checks_ok(&checks);
 
     DoctorReport {
@@ -85,7 +78,7 @@ fn config_check(path: &Path, loaded: &Result<Config, ConfigError>) -> CheckRow {
                 path.display(),
                 config.connections.len()
             ),
-            None::<&str>,
+            None,
         ),
         Err(err) => CheckRow::new(
             "config",
@@ -109,7 +102,7 @@ fn ports_check(config: Option<&Config>) -> CheckRow {
             "ports",
             CheckStatus::Pass,
             "skipped: config not loaded",
-            None::<&str>,
+            None,
         );
     };
 
@@ -120,12 +113,7 @@ fn ports_check(config: Option<&Config>) -> CheckRow {
         .collect();
 
     if conflicts.is_empty() {
-        CheckRow::new(
-            "ports",
-            CheckStatus::Pass,
-            "no port conflicts",
-            None::<&str>,
-        )
+        CheckRow::new("ports", CheckStatus::Pass, "no port conflicts", None)
     } else {
         CheckRow::new(
             "ports",
@@ -279,7 +267,7 @@ mod tests {
     }
 
     fn check_row(id: &str, status: CheckStatus) -> CheckRow {
-        CheckRow::new(id, status, "", None::<&str>)
+        CheckRow::new(id, status, "", None)
     }
 
     // -- all_checks_ok: the one ⇔ rule in docs/doctor.v1.md's Invariant ------
@@ -473,18 +461,36 @@ mod tests {
             version: 1,
             cli_version: "0.1.0".to_string(),
             ok: false,
-            checks: vec![
+            checks: [
                 CheckRow::new(
                     "config",
                     CheckStatus::Pass,
                     "/home/you/connections.json (2 connections)",
-                    None::<&str>,
+                    None,
+                ),
+                CheckRow::new(
+                    "proxy_bin",
+                    CheckStatus::Pass,
+                    "/usr/bin/cloud-sql-proxy (2.25.2)",
+                    None,
+                ),
+                CheckRow::new(
+                    "systemd_user",
+                    CheckStatus::Pass,
+                    "systemd 256.4-1-arch",
+                    None,
                 ),
                 CheckRow::new(
                     "adc",
                     CheckStatus::Fail,
                     "no Application Default Credentials file",
                     Some("gcloud auth application-default login"),
+                ),
+                CheckRow::new(
+                    "journal_user",
+                    CheckStatus::Pass,
+                    "systemd-journald active",
+                    None,
                 ),
                 CheckRow::new(
                     "ports",

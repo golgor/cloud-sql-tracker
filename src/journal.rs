@@ -99,7 +99,7 @@ fn check_row_for_journal_user(result: Result<Output, JournalError>) -> CheckRow 
             "journal_user",
             CheckStatus::Pass,
             "user journal is accessible",
-            None::<&str>,
+            None,
         ),
         Err(err) => CheckRow::new(
             "journal_user",

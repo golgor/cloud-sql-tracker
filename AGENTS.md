@@ -181,6 +181,7 @@ In-process serde is not Layer 2. Goldens-only is not Layer 2. Landing `commands`
 
 - **Implement** with a Sonnet-5 subagent on a worktree. Parent does not write product code.
 - When the implementer is done: dual GitHub review — **chatgpt-sol** (spec vs frozen contracts) and **Opus-5** (module seams / depth / **Code style**). Give both the branch as a **worktree** (next bullet), not only a pasted diff.
+- **Review scope:** start with the diff since the last reviewed commit. Trace callers, callees, and contracts only when the change relies on them. Report a verified finding outside the diff. Do not re-audit the full branch only because a follow-up commit exists.
 - Reviewers and researchers usually have **no shell**. Give them a **git worktree** of the branch plus evidence files inside it: `git worktree add ../cloud-sql-tracker-<n> <branch>`, then write `REVIEW_DIFF.patch` and the issue body there. A pasted diff alone blocks them as soon as they need to read a neighbouring file. Do not commit those scratch files.
 - Measurements are the **parent's or implementer's** job. A research subagent cannot run `cargo`; hand it the numbers to write up.
 - Must-fix → Sonnet-5 again on the same branch. Repeat until **both** reviewers and the coder are satisfied.
