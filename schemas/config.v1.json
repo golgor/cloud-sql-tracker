@@ -23,7 +23,8 @@
     },
     "connections": {
       "type": "array",
-      "description": "Connection inventory. May be empty. After merge: unique id, port, and instance.",
+      "maxItems": 32,
+      "description": "Connection inventory. May be empty. Maximum 32 rows; every Connection counts, including disabled rows. After merge: unique id, port, and instance.",
       "items": { "$ref": "#/$defs/connectionObject" }
     }
   },

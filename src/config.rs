@@ -18,6 +18,9 @@ const DEFAULT_ADDRESS: &str = "127.0.0.1";
 const RESERVED_PORTS: [u16; 3] = [1433, 3306, 5432];
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 const MAX_ID_LEN: usize = 64;
+/// Hard cap on Connection count (`docs/config.v1.md`, "Top-level object",
+/// the `connections` row). Counts every row, including `enabled: false`.
+const MAX_CONNECTIONS: usize = 32;
 
 /// Runtime Connection inventory after load, merge, and validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,8 @@ pub(crate) enum ConfigError {
     DuplicatePort(u16),
     #[error("duplicate instance `{0}`")]
     DuplicateInstance(String),
+    #[error("config holds {count} connections, the maximum is {max}")]
+    TooManyConnections { count: usize, max: usize },
 }
 
 /// Read `path` then [`parse`] its bytes.
@@ -77,6 +82,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Config, ConfigError> {
         .into_iter()
         .map(|connection| merge_connection(&defaults, connection))
         .collect::<Result<Vec<_>, _>>()?;
+    check_connection_count(&connections)?;
     check_uniqueness(&connections)?;
 
     Ok(Config {
@@ -292,6 +298,21 @@ fn validate_port(port: u16) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Refuse a config with more than [`MAX_CONNECTIONS`] rows. Counts every
+/// Connection, including `enabled: false` (`docs/config.v1.md`,
+/// "Top-level object", the `connections` row). All-or-nothing: one
+/// Connection over the limit fails the whole document, same as any other
+/// validation error.
+fn check_connection_count(connections: &[Connection]) -> Result<(), ConfigError> {
+    if connections.len() > MAX_CONNECTIONS {
+        return Err(ConfigError::TooManyConnections {
+            count: connections.len(),
+            max: MAX_CONNECTIONS,
+        });
+    }
+    Ok(())
 }
 
 /// Unique `id`, `port`, and `instance` across the whole file
@@ -593,6 +614,40 @@ mod tests {
         let err =
             parse(json.as_bytes()).expect_err("group belongs on each connection, not defaults");
         assert!(matches!(err, ConfigError::Json(_)));
+    }
+
+    /// Builds a `connections.json` body with `count` valid, unique rows.
+    /// Row 0 is `enabled: false`, so the 33-row test can prove a disabled
+    /// row still counts toward the limit.
+    fn connections_json(count: usize) -> String {
+        let rows: Vec<String> = (0..count)
+            .map(|i| {
+                let enabled = if i == 0 { "false" } else { "true" };
+                format!(
+                    r#"{{"id": "c{i}", "name": "C{i}", "group": "g", "instance": "p:r:i{i}", "port": {port}, "enabled": {enabled}}}"#,
+                    port = 20000 + i
+                )
+            })
+            .collect();
+        format!(r#"{{"version": 1, "connections": [{}]}}"#, rows.join(","))
+    }
+
+    #[test]
+    fn parse_rejects_a_config_with_more_than_32_connections() {
+        let json = connections_json(33);
+        let err = parse(json.as_bytes()).expect_err("33 connections must reject");
+        assert_eq!(
+            err.to_string(),
+            "config holds 33 connections, the maximum is 32"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_a_config_with_exactly_32_connections() {
+        let json = connections_json(32);
+        let config = parse(json.as_bytes()).expect("32 connections is valid");
+        assert_eq!(config.connections.len(), 32);
+        assert!(!config.connections[0].enabled, "row 0 stays disabled");
     }
 
     #[test]
