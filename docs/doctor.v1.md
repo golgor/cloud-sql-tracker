@@ -82,7 +82,7 @@ If config fails to load: still run `proxy_bin`, `systemd_user`, `adc`, `journal_
 
 The maximum output size for `doctor --json` is **64 KiB** (65,536 bytes).
 
-- The checklist is fixed at maximum **6** checks (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`).
+- The checklist is fixed at exactly **6** checks (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`).
 - `detail` and `hint` strings are clamped at production seams to at most **512 UTF-8 bytes** (up to 3072 bytes in JSON output when escaped).
 - As a final backstop before stdout, `doctor --json` serializes the report in memory and checks total emitted byte length (including the final trailing newline) against 65,536 bytes. If it exceeds 65,536 bytes, the CLI writes **no JSON** to stdout, prints an error to stderr, and exits **3**.
 
@@ -97,7 +97,7 @@ The maximum output size for `doctor --json` is **64 KiB** (65,536 bytes).
 | `version` | integer | yes | Schema id of **this** Doctor report. Always `1` for this contract. |
 | `cli_version` | string | yes | Binary semver (`CARGO_PKG_VERSION`). |
 | `ok` | boolean | yes | `true` iff no check has `status === "fail"`. Warns do not clear `ok`. |
-| `checks` | array | yes | Ordered list of check objects (stable order recommended below). |
+| `checks` | array | yes | Ordered list of exactly six check objects (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`). |
 
 **Invariant:** `ok === false` ⇔ some check has `status === "fail"`.
 

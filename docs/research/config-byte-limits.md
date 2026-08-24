@@ -51,7 +51,7 @@ All config string fields require printable ASCII bytes `0x20` through `0x7E`.
 - **Connections limit:** Maximum 32 rows (`connections.json`).
 - **Groups limit:** Maximum 32 groups.
 - **Error detail limit:** Clamped to at most 512 raw UTF-8 bytes at production seams. External error messages can contain control characters (`0x01`), expanding 6x (3072 bytes) in JSON output.
-- **Field-wise conservative hard upper-bound fixture:** 160,586 bytes when serialized with `serde_json::to_string_pretty` plus a trailing newline. Every row carries maximum length `id` (64 B), `name` (64 quote/backslash B -> 128 B JSON), `group` (32 B -> 61 B JSON), `instance` (256 B -> 498 B JSON), `address` (253 B -> 508 B JSON), `unit` (88 B -> 90 B JSON), `pid` (`u32::MAX`), `uptime_sec` (`u64::MAX`), `cli_version` (64 B), and a 512-byte control-character `error.detail` (3072 B JSON).
+- **Field-wise schema-valid serialization fixture:** 161,162 bytes when serialized with `serde_json::to_string_pretty` plus a trailing newline (`\n`). This fixture is conservative for model fields and represents an extreme field-wise upper bound across all schema limits (not a reachable live process state). The final writer cap is the absolute emitted-output guard.
 - **Observed 32-row max config input binary fixture size:** 52,965 bytes for 32 maximum-size connections with quotes and backslashes in config.
 - **Enforced cap:** 256 KiB (262,144 bytes).
 
@@ -59,25 +59,25 @@ All config string fields require printable ASCII bytes `0x20` through `0x7E`.
 
 | Field / Component | Raw Input Bounds | JSON Escaped Bytes | 32-Row Subtotal |
 |-------------------|------------------|--------------------|-----------------|
-| Top-level keys / ts / version / aggregates | Fixed fields | ~200 B | ~200 B |
+| Top-level keys / ts (64 B) / version / aggregates | Fixed fields | ~244 B | ~244 B |
 | `cli_version` | 64 B printable ASCII | 66 B (with quotes) | 66 B |
-| `groups` map (32 entries) | 32 B key + GroupCounts | ~140 B per entry | ~4,480 B |
+| `groups` map (32 entries) | 32 B all-escaped key + GroupCounts | ~176 B per entry | ~5,663 B |
 | `connections[].id` | 64 B printable ASCII | 66 B | 2,112 B |
 | `connections[].name` | 64 B quote/backslash | 130 B | 4,160 B |
-| `connections[].group` | 32 B quote/backslash | 63 B | 2,016 B |
-| `connections[].instance` | 256 B 3-part quote/backslash | 498 B | 15,936 B |
+| `connections[].group` | 32 B quote/backslash | 66 B | 2,112 B |
+| `connections[].instance` | 256 B 3-part quote/backslash | 512 B | 16,384 B |
 | `connections[].address` | 253 B quote/backslash | 508 B | 16,256 B |
 | `connections[].unit` | 88 B unit name | 90 B | 2,880 B |
-| `connections[].pid` / `uptime_sec` / `port` / flags | Max integers / bools | ~65 B | ~2,080 B |
+| `connections[].pid` / `uptime_sec` / `port` / flags / state / source / error code | Max integers / bools / `start_timeout` | ~95 B | ~3,040 B |
 | `connections[].error.detail` | 512 B control chars (`\x01`) | 3,074 B | 98,368 B |
-| JSON keys, commas, spaces, newlines | Formatting overhead | ~380 B per row | ~12,160 B |
-| **Total Status JSON (with `\n`)** | | | **160,586 B** |
+| JSON keys, commas, spaces, newlines | Formatting overhead | ~307 B per row | ~10,827 B |
+| **Total Status JSON (with `\n`)** | | | **161,162 B** |
 
 ### Doctor Document
 
-- **Checks limit:** Fixed at 6 checks (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`).
+- **Checks limit:** Fixed at exactly 6 checks (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`).
 - **Detail and hint limit:** Each `detail` and `hint` string is clamped to at most 512 raw UTF-8 bytes at production seams (up to 3072 bytes in JSON output when escaped with `0x01` control characters).
-- **Field-wise conservative hard upper-bound fixture:** 37,588 bytes when serialized with `serde_json::to_string_pretty` plus a trailing newline. All 6 checks carry 512 control-character bytes in both `detail` and `hint`, with a 64-byte `cli_version`.
+- **Field-wise schema-valid serialization fixture:** 37,588 bytes when serialized with `serde_json::to_string_pretty` plus a trailing newline (`\n`). This fixture is conservative for model fields and represents an extreme field-wise upper bound across all schema limits (not a reachable live process state). The final writer cap is the absolute emitted-output guard. All 6 checks carry 512 control-character bytes in both `detail` and `hint`, with a 64-byte `cli_version`.
 - **Observed binary Doctor fixture size:** 1,440 bytes for a full 6-check report with dynamic text.
 - **Enforced cap:** 64 KiB (65,536 bytes).
 

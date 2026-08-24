@@ -185,6 +185,10 @@ fn status_json_stdout_with_zero_connections_validates_against_the_status_schema(
          I/O for zero Connections); stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stdout.ends_with(b"\n"),
+        "status --json stdout must end with a final newline"
+    );
 
     let instance = parse_stdout_json(&output.stdout);
     assert_validates("schemas/status.v1.json", &instance);
@@ -220,6 +224,10 @@ fn status_json_stdout_validates_against_the_status_schema() {
 
     match output.status.code() {
         Some(0) => {
+            assert!(
+                output.stdout.ends_with(b"\n"),
+                "status --json stdout must end with a final newline"
+            );
             let instance = parse_stdout_json(&output.stdout);
             assert_validates("schemas/status.v1.json", &instance);
             assert_eq!(instance["version"], 1);
@@ -297,6 +305,10 @@ fn doctor_json_stdout_validates_against_the_doctor_schema_with_a_valid_config() 
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stdout.ends_with(b"\n"),
+        "doctor --json stdout must end with a final newline"
+    );
 
     let instance = parse_stdout_json(&output.stdout);
     assert_validates("schemas/doctor.v1.json", &instance);
@@ -337,6 +349,10 @@ fn doctor_json_stdout_validates_against_the_doctor_schema_with_a_missing_config(
     // A failed `config` check makes `ok: false` -> exit `3`
     // (`docs/cli-contract.v1.md`, "`doctor`": "`3` if any check fails").
     assert_eq!(output.status.code(), Some(3));
+    assert!(
+        output.stdout.ends_with(b"\n"),
+        "doctor --json stdout with missing config must end with a final newline"
+    );
 
     let instance = parse_stdout_json(&output.stdout);
     assert_validates("schemas/doctor.v1.json", &instance);
@@ -392,6 +408,10 @@ fn golden_config_matches_the_schema_and_the_binary_accepts_it() {
         "unexpected exit {:?} for doctor --json on the golden config; stderr:\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.ends_with(b"\n"),
+        "doctor --json stdout on golden config must end with a final newline"
     );
 
     let instance = parse_stdout_json(&output.stdout);
@@ -495,6 +515,10 @@ fn status_json_stdout_32_row_max_config_input_coverage_stays_under_cap() {
 
     let stdout_bytes = &output.stdout;
     assert!(
+        stdout_bytes.ends_with(b"\n"),
+        "status --json 32-row stdout must end with a final newline"
+    );
+    assert!(
         stdout_bytes.len() <= 262_144,
         "stdout byte length {} exceeds 262144 bytes",
         stdout_bytes.len()
@@ -534,6 +558,10 @@ fn doctor_json_stdout_max_config_input_coverage_stays_under_cap() {
 
     let stdout_bytes = &output.stdout;
     assert!(
+        stdout_bytes.ends_with(b"\n"),
+        "doctor --json stdout must end with a final newline"
+    );
+    assert!(
         stdout_bytes.len() <= 65_536,
         "stdout byte length {} exceeds 65536 bytes",
         stdout_bytes.len()
@@ -542,7 +570,7 @@ fn doctor_json_stdout_max_config_input_coverage_stays_under_cap() {
     let instance = parse_stdout_json(stdout_bytes);
     assert_validates("schemas/doctor.v1.json", &instance);
     assert_eq!(instance["ok"], false);
-    assert!(instance["checks"].as_array().unwrap().len() <= 6);
+    assert_eq!(instance["checks"].as_array().unwrap().len(), 6);
     eprintln!(
         "MEASURED: observed Doctor JSON stdout size: {} bytes (cap: 65536)",
         stdout_bytes.len()

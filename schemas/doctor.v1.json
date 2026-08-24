@@ -24,9 +24,10 @@
     },
     "checks": {
       "type": "array",
+      "minItems": 6,
       "maxItems": 6,
       "items": { "$ref": "#/$defs/check" },
-      "description": "Ordered checklist results. Maximum 6 checks."
+      "description": "Ordered checklist results. Exactly 6 checks."
     }
   },
   "$defs": {

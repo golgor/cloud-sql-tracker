@@ -902,10 +902,14 @@ mod tests {
 
         let mut groups = std::collections::BTreeMap::new();
         for i in 0..32 {
-            let group_key = format!(
-                "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"g{:02}",
-                i
-            );
+            let mut group_key = "\\".repeat(27);
+            for bit in (0..5).rev() {
+                if (i >> bit) & 1 == 1 {
+                    group_key.push('"');
+                } else {
+                    group_key.push('\\');
+                }
+            }
             assert_eq!(group_key.len(), 32);
             groups.insert(
                 group_key,
@@ -921,17 +925,22 @@ mod tests {
 
         let mut connections = Vec::with_capacity(32);
         for i in 0..32 {
-            let id = format!("c{i:063}");
+            let id = format!("c{:02}{}", i, "a".repeat(61));
             assert_eq!(id.len(), 64);
             let name = "\"\\".repeat(32);
             assert_eq!(name.len(), 64);
-            let group = format!(
-                "\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"g{:02}",
-                i
-            );
+
+            let mut group = "\\".repeat(27);
+            for bit in (0..5).rev() {
+                if (i >> bit) & 1 == 1 {
+                    group.push('"');
+                } else {
+                    group.push('\\');
+                }
+            }
             assert_eq!(group.len(), 32);
-            let instance = format!("\"\"\"\"\"\"\"\"\"\":reg:{}", "\"".repeat(241));
-            assert_eq!(instance.len(), 256);
+
+            let instance = format!("\\:\\:{}", "\"\\".repeat(126));
             assert_eq!(instance.len(), 256);
             let address = format!("{}\"", "\"\\".repeat(126));
             assert_eq!(address.len(), 253);
@@ -943,16 +952,16 @@ mod tests {
                 instance,
                 address,
                 port: 65535,
-                private_ip: true,
-                enabled: true,
+                private_ip: false,
+                enabled: false,
                 state: HealthState::Error,
                 source: Source::Unit,
                 pid: Some(u32::MAX),
                 unit: unit_name(&id).ok(),
-                port_open: true,
+                port_open: false,
                 uptime_sec: Some(u64::MAX),
                 error: Some(StatusError {
-                    code: ErrorCode::Unknown,
+                    code: ErrorCode::StartTimeout,
                     detail: "\x01".repeat(512),
                 }),
             });
