@@ -99,7 +99,7 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 |-------|----------|--------|
 | `id` | yes | `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1–64. Suffix of unit name `cloud-sql-proxy-<id>.service`. |
 | `name` | yes | Non-empty string (display label). |
-| `group` | yes | Non-empty string (free text; not a fixed enum). |
+| `group` | yes | Non-empty string (free text; not a fixed enum). The first character must not be `-`. |
 | `instance` | yes | Cloud SQL instance connection name: exactly three non-empty segments separated by `:` — `project:region:instance` (regex: `^[^:\s]+:[^:\s]+:[^:\s]+$`). |
 | `port` | yes | Integer **1024–65535**, and **not** in the reserved set (below). |
 | `address` | no | Non-empty string; default `127.0.0.1`. |
@@ -107,6 +107,15 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 | `auto_iam_authn` | no | Boolean; default `false` → proxy flag when true. |
 | `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Default `[]`. |
 | `enabled` | no | Boolean; default `true`. |
+
+### Decision: the `group` leading-hyphen rule keeps schema version 1
+
+A leading `-` in `group` did load before this rule. So this rule is a
+restriction, not an addition. In the strict sense, it is a breaking change to
+the config schema.
+
+`version` stays `1`. The project is still in development. A later reader must
+not treat the missing version bump as a mistake.
 
 ### Reserved ports (hard errors)
 
