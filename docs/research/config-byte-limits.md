@@ -1,6 +1,6 @@
 # Research brief — Config Byte Limits and Output Document Caps
 
-Snapshot date: 2026-08-24  
+Snapshot date: 2026-08-24
 Primary links:
 - [RFC 8259 — The JavaScript Object Notation (JSON) Data Interchange Format](https://datatracker.ietf.org/doc/html/rfc8259)
 - [JSON Schema Draft 2020-12](https://json-schema.org/draft/2020-12/schema)
@@ -10,9 +10,9 @@ Primary links:
 
 ## Executive Summary
 
-**Pick:** Enforce printable ASCII config strings and hard byte caps on Status (256 KiB) and Doctor (64 KiB) JSON output.  
-**Why:** Guarantees well-defined maximum output sizes to protect control plane consumers and UI bars.  
-**Discarded:** Allowing arbitrary UTF-8 in config strings or relying only on in-process serde without final output size checks.  
+**Pick:** Enforce printable ASCII config strings and hard byte caps on Status (256 KiB) and Doctor (64 KiB) JSON output.
+**Why:** Guarantees well-defined maximum output sizes to protect control plane consumers and UI bars.
+**Discarded:** Allowing arbitrary UTF-8 in config strings or relying only on in-process serde without final output size checks.
 **Unchanged:** Existing `id` character rules and the JSON Schema version 1 remain unchanged.
 
 ---
@@ -50,17 +50,17 @@ All config string fields require printable ASCII bytes `0x20` through `0x7E`.
 
 - **Connections limit:** Maximum 32 rows (`connections.json`).
 - **Groups limit:** Maximum 32 groups.
-- **Error detail limit:** Clamped to at most 512 raw UTF-8 bytes at production seams. External error messages can contain control characters, expanding up to 6x (3072 bytes) in JSON output.
-- **Conservative hard upper bound:** 158,446 bytes. This formula overcounts because error details and normal running states are mutually exclusive across rows.
-- **Observed adversarial fixture size:** 27,738 bytes for 32 maximum-size connections with quotes and backslashes.
+- **Error detail limit:** Clamped to at most 512 raw UTF-8 bytes at production seams. External error messages can contain control characters (`0x01`), expanding 6x (3072 bytes) in JSON output.
+- **Field-wise conservative hard upper-bound fixture:** 140,452 bytes when serialized with `serde_json::to_string_pretty`. Every row carries maximum length `id`, `name`, `group`, `instance`, `address`, `unit`, `pid`, `uptime_sec`, and a 512-byte control-character `error.detail`.
+- **Observed 32-row binary config fixture size:** 52,964 bytes for 32 maximum-size connections with quotes and backslashes in config.
 - **Enforced cap:** 256 KiB (262,144 bytes).
 
 ### Doctor Document
 
 - **Checks limit:** Fixed at maximum 6 checks (`config`, `proxy_bin`, `systemd_user`, `adc`, `journal_user`, `ports`).
-- **Detail and hint limit:** Each `detail` and `hint` string is clamped to at most 512 raw UTF-8 bytes at production seams (up to 3072 bytes in JSON output when escaped).
-- **Conservative hard upper bound:** 37,460 bytes. This overcounts because passing checks do not produce error hints.
-- **Observed max fixture size:** 1,440 bytes for a full 6-check report with dynamic text.
+- **Detail and hint limit:** Each `detail` and `hint` string is clamped to at most 512 raw UTF-8 bytes at production seams (up to 3072 bytes in JSON output when escaped with `0x01` control characters).
+- **Field-wise conservative hard upper-bound fixture:** 37,528 bytes when serialized with `serde_json::to_string_pretty`. All 6 checks carry 512 control-character bytes in both `detail` and `hint`.
+- **Observed binary Doctor fixture size:** 1,439 bytes for a full 6-check report with dynamic text.
 - **Enforced cap:** 64 KiB (65,536 bytes).
 
 ---
@@ -71,5 +71,5 @@ Immediately before writing to stdout for `status --json` and `doctor --json`:
 
 1. The report serializes to a pretty JSON string in memory.
 2. The serializer UTF-8 byte length is compared against the command cap.
-3. If the length is within the cap, the document is printed to stdout.
+3. If the length is within the cap, the document is printed to stdout without implicit trailing newlines.
 4. If the length exceeds the cap, **no JSON** is written to stdout, an error message is printed to stderr, and the process exits with code **3**.

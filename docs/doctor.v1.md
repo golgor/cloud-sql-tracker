@@ -139,9 +139,9 @@ Unknown future `id` values: consumers should tolerate and display them.
 - Resolve `proxy_bin` from merged config defaults when config loaded; else built-in default name `cloud-sql-proxy` on `PATH`.
 - Must exist and be executable → else **`fail`** (resolve stage; no spawn).
 - After a successful resolve, spawn the resolved path with argv **`-v`** only (same as `cloud-sql-proxy --version`). Wait at most **2 seconds**.
-- **Pass** when the process exits 0 and stdout or stderr contains a line with `cloud-sql-proxy version <token>` **anywhere in it** (a log-prefixed line still matches; example: `cloud-sql-proxy version 2.25.2+linux.amd64`).
+- **Pass** when the process exits 0 and stdout or stderr contains a line with `cloud-sql-proxy version <token>` **anywhere in it** (a log-prefixed line still matches; example: `cloud-sql-proxy version 2.25.2+linux.amd64`). Token must be non-empty, contain at least one ASCII digit, consist of printable ASCII (`0x20`–`0x7E`), and be at most 128 bytes.
 - **Pass `detail` format:** `{resolved_path} ({version_token})` — example: `/usr/bin/cloud-sql-proxy (2.25.2+linux.amd64)`. Prefer an absolute path when resolved.
-- **Fail** when resolve fails, spawn fails, the process times out, exit status is non-zero, output is empty, or the identity line does not match. `hint` should point operators at installing `cloud-sql-proxy` or fixing `proxy_bin` in config.
+- **Fail** when resolve fails, spawn fails, the process times out, exit status is non-zero, output is empty, or the identity line / version token does not match. If the version marker is found but the token is missing, malformed, or exceeds 128 bytes, doctor reports a specific error detail distinguishing token invalidity from a missing marker. `hint` should point operators at installing `cloud-sql-proxy` or fixing `proxy_bin` in config.
 - Doctor owns this probe. **Start** still only resolves the path at mutate time; it does not run `-v` on the happy path.
 - v1 does **not** enforce a minimum proxy semver.
 

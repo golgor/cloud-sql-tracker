@@ -47,13 +47,13 @@
         },
         "detail": {
           "type": "string",
-          "maxLength": 3072,
-          "description": "Human-readable outcome; raw text clamped to at most 512 UTF-8 bytes (up to 3072 JSON-escaped bytes)."
+          "maxLength": 512,
+          "description": "Human-readable outcome; raw text clamped to at most 512 UTF-8 bytes."
         },
         "hint": {
           "type": ["string", "null"],
-          "maxLength": 3072,
-          "description": "Optional remediation or doc link; null when none. Raw text clamped to at most 512 UTF-8 bytes (up to 3072 JSON-escaped bytes)."
+          "maxLength": 512,
+          "description": "Optional remediation or doc link; null when none. Raw text clamped to at most 512 UTF-8 bytes."
         }
       }
     }

@@ -216,7 +216,6 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connec
 
     let extra_args = raw
         .extra_args
-        .clone()
         .or_else(|| defaults.extra_args.clone())
         .unwrap_or_default();
     validate_extra_args(&extra_args).map_err(|reason| invalid(&id, reason))?;
@@ -249,6 +248,21 @@ fn is_printable_ascii(s: &str) -> bool {
     s.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }
 
+fn bounded_ascii(field: &str, value: &str, max: usize) -> Result<(), String> {
+    if !is_printable_ascii(value) {
+        return Err(format!(
+            "{field} must contain only printable ASCII characters"
+        ));
+    }
+    if value.len() > max {
+        return Err(format!(
+            "{field} exceeds limit of {max} bytes (got {})",
+            value.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Shared non-empty check for `name`, `group`, and `address`
 /// (`docs/config.v1.md`, "Connection fields").
 fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
@@ -263,16 +277,7 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
 /// "Connection fields").
 fn validate_name(name: &str) -> Result<(), String> {
     require_non_empty("name", name)?;
-    if !is_printable_ascii(name) {
-        return Err("name must contain only printable ASCII characters".to_string());
-    }
-    if name.len() > MAX_NAME_LEN {
-        return Err(format!(
-            "name exceeds limit of {MAX_NAME_LEN} bytes (got {})",
-            name.len()
-        ));
-    }
-    Ok(())
+    bounded_ascii("name", name, MAX_NAME_LEN)
 }
 
 /// Non-empty, printable ASCII, length 1-32, and must not start with `-`
@@ -284,32 +289,14 @@ fn validate_group(group: &str) -> Result<(), String> {
     if group.starts_with('-') {
         return Err(format!("group `{group}` must not start with '-'"));
     }
-    if !is_printable_ascii(group) {
-        return Err("group must contain only printable ASCII characters".to_string());
-    }
-    if group.len() > MAX_GROUP_LEN {
-        return Err(format!(
-            "group exceeds limit of {MAX_GROUP_LEN} bytes (got {})",
-            group.len()
-        ));
-    }
-    Ok(())
+    bounded_ascii("group", group, MAX_GROUP_LEN)
 }
 
 /// Non-empty, printable ASCII, length 1-253 after the defaults merge
 /// (`docs/config.v1.md`, "Connection fields").
 fn validate_address(address: &str) -> Result<(), String> {
     require_non_empty("address", address)?;
-    if !is_printable_ascii(address) {
-        return Err("address must contain only printable ASCII characters".to_string());
-    }
-    if address.len() > MAX_ADDRESS_LEN {
-        return Err(format!(
-            "address exceeds limit of {MAX_ADDRESS_LEN} bytes (got {})",
-            address.len()
-        ));
-    }
-    Ok(())
+    bounded_ascii("address", address, MAX_ADDRESS_LEN)
 }
 
 /// `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1-64 (`docs/config.v1.md`,
@@ -330,9 +317,7 @@ fn validate_id(id: &str) -> Result<(), String> {
 /// `project:region:instance` — three non-empty, whitespace-free segments,
 /// printable ASCII, length 1-256 (`docs/config.v1.md`, "Connection fields").
 fn validate_instance(instance: &str) -> Result<(), String> {
-    if !is_printable_ascii(instance) {
-        return Err("instance must contain only printable ASCII characters".to_string());
-    }
+    bounded_ascii("instance", instance, MAX_INSTANCE_LEN)?;
     let segments: Vec<&str> = instance.split(':').collect();
     let shape_ok = segments.len() == 3
         && segments
@@ -341,12 +326,6 @@ fn validate_instance(instance: &str) -> Result<(), String> {
     if !shape_ok {
         return Err(format!(
             "instance `{instance}` must be project:region:instance (three non-empty segments)"
-        ));
-    }
-    if instance.len() > MAX_INSTANCE_LEN {
-        return Err(format!(
-            "instance exceeds limit of {MAX_INSTANCE_LEN} bytes (got {})",
-            instance.len()
         ));
     }
     Ok(())

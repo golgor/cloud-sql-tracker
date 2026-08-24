@@ -197,7 +197,7 @@ cloud-sql-tracker doctor [--json]
 | `0` | Success | All requested work succeeded, including idempotent no-ops. `status` produced a document. `restart --failed` with zero matches. `logs` with journalctl success (including **empty** journal). |
 | `1` | Partial failure | Multi-target batch: **at least one** target succeeded and **at least one** failed. Survivors keep their new state. **Not used by `logs`** (single-id only). |
 | `2` | Usage / config | Bad argv, missing/invalid config file, unknown id/group, mutual exclusion violation, invalid `--lines`. |
-| `3` | Dependency | Cannot operate: e.g. no systemd user bus, proxy binary unresolved when required for the whole command, **`journalctl` missing or user journal unusable** (`logs`). Prefer `3` when failure is environmental rather than per-id. |
+| `3` | Dependency | Cannot operate: e.g. no systemd user bus, proxy binary unresolved when required for the whole command, **`journalctl` missing or user journal unusable** (`logs`), **output document exceeds maximum allowed size** (`status --json` > 262,144 bytes or `doctor --json` > 65,536 bytes). Prefer `3` when failure is environmental rather than per-id. |
 | `4` | Total failure | Every target in the batch failed, **or** a single-id mutating command failed after attempting the operation. **Not used by `logs`** (empty journal is `0`; journal access problems are `3`). |
 
 #### Examples
@@ -229,6 +229,8 @@ cloud-sql-tracker doctor [--json]
 - `doctor --json`: maximum **64 KiB** (65,536 bytes).
 
 If `status --json` or `doctor --json` exceeds its output cap during final serialization, the CLI writes **no JSON** to stdout, prints an error message to stderr, and exits **3** (Dependency / environmental backstop).
+
+Note that `doctor --json` returns exit code **3** both when any check fails (`ok: false`) and when the report breaches its output cap. A consumer distinguishes an output cap breach from a check failure by stdout: cap breach produces empty stdout, whereas check failure outputs the JSON report.
 
 ---
 

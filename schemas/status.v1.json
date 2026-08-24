@@ -26,6 +26,7 @@
     "ts": {
       "type": "string",
       "format": "date-time",
+      "maxLength": 64,
       "description": "RFC 3339 timestamp when the snapshot was built."
     },
     "cli_version": {
@@ -63,8 +64,12 @@
       "type": "object",
       "maxProperties": 32,
       "propertyNames": {
+        "minLength": 1,
         "maxLength": 32,
-        "pattern": "^[ -~]+$"
+        "allOf": [
+          { "pattern": "^[ -~]+$" },
+          { "pattern": "^[^-]" }
+        ]
       },
       "additionalProperties": {
         "$ref": "#/$defs/groupCounts"
@@ -128,8 +133,8 @@
         },
         "detail": {
           "type": "string",
-          "maxLength": 3072,
-          "description": "Human-readable explanation; raw text clamped to at most 512 UTF-8 bytes (up to 3072 JSON-escaped bytes)."
+          "maxLength": 512,
+          "description": "Human-readable explanation; raw text clamped to at most 512 UTF-8 bytes."
         }
       }
     },
@@ -172,13 +177,20 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[^-][ -~]*$",
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^-]" }
+          ],
           "description": "Group key for bulk actions and UI grouping."
         },
         "instance": {
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$" }
+          ],
           "description": "Cloud SQL instance connection name (project:region:instance)."
         },
         "address": {

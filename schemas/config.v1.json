@@ -62,12 +62,18 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[^-][ -~]*$"
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^-]" }
+          ]
         },
         "instance": {
           "type": "string",
           "maxLength": 256,
-          "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$"
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$" }
+          ]
         },
         "port": { "$ref": "#/$defs/port" },
         "address": {
@@ -106,13 +112,19 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 32,
-          "pattern": "^[^-][ -~]*$",
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^-]" }
+          ],
           "description": "Group key for bulk actions and UI. Must not start with '-' (clap reads a leading hyphen as an option). Printable ASCII, maximum 32 bytes."
         },
         "instance": {
           "type": "string",
           "maxLength": 256,
-          "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$",
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$" }
+          ],
           "description": "project:region:instance; printable ASCII, maximum 256 bytes"
         },
         "port": { "$ref": "#/$defs/port" },

@@ -20,7 +20,7 @@ use serde::Serialize;
 /// wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
-pub(crate) struct UnitName(String);
+pub struct UnitName(String);
 
 impl UnitName {
     pub(crate) fn as_str(&self) -> &str {
@@ -52,7 +52,7 @@ const MAX_UNIT_NAME_LEN: usize = 255;
 /// **non**-config-valid id can still sanitize to nothing (`Empty`) or,
 /// once prefixed and suffixed, exceed the systemd unit-name length limit
 /// (`TooLong`). A config-valid id never hits either error in practice.
-pub(crate) fn unit_name(id: &str) -> Result<UnitName, UnitNameError> {
+pub fn unit_name(id: &str) -> Result<UnitName, UnitNameError> {
     let core = if is_config_valid_id(id) {
         id.to_string()
     } else {
@@ -122,7 +122,7 @@ fn collapse_repeated_dashes(s: &str) -> String {
 
 /// Why a Connection id could not become a unit name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UnitNameError {
+pub enum UnitNameError {
     /// The id sanitizes to nothing (e.g. `"---"`).
     Empty,
     /// `cloud-sql-proxy-<id>.service` would exceed the systemd unit-name
@@ -169,7 +169,7 @@ pub(crate) struct Connection {
 /// (`docs/status-document.v1.md`, "`state` (Health state)").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum HealthState {
+pub enum HealthState {
     Stopped,
     Starting,
     Running,
@@ -185,7 +185,7 @@ pub(crate) enum HealthState {
 /// (`docs/status-document.v1.md`, "`source` (ownership)").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Source {
+pub enum Source {
     /// Process is the MainPID of our expected user Unit.
     Unit,
     /// No managed Unit process attributed.
@@ -220,7 +220,7 @@ pub(crate) enum PortProbe {
 /// (`docs/status-document.v1.md`, "`error` object").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ErrorCode {
+pub enum ErrorCode {
     /// Reserved for a per-Connection `proxy_bin` failure. `commands::start`
     /// (#43) classifies an unresolved `proxy_bin` as a whole-command
     /// dependency failure instead (`commands::mutate::TargetResult::
@@ -253,10 +253,10 @@ pub(crate) enum ErrorCode {
     Unknown,
 }
 
-pub(crate) const MAX_DETAIL_LEN: usize = 512;
+const MAX_DETAIL_LEN: usize = 512;
 
 /// Safely truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a code point.
-pub(crate) fn clamp_utf8(s: &str, max_bytes: usize) -> &str {
+fn clamp_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         s
     } else {
@@ -270,9 +270,9 @@ pub(crate) fn clamp_utf8(s: &str, max_bytes: usize) -> &str {
 
 /// Present on a Status row only when `state == Error`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StatusError {
-    pub(crate) code: ErrorCode,
-    pub(crate) detail: String,
+pub struct StatusError {
+    pub code: ErrorCode,
+    pub detail: String,
 }
 
 impl StatusError {
@@ -286,47 +286,47 @@ impl StatusError {
 
 /// One `connections[]` element of the Status document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StatusRow {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) group: String,
-    pub(crate) instance: String,
-    pub(crate) address: String,
-    pub(crate) port: u16,
-    pub(crate) private_ip: bool,
-    pub(crate) enabled: bool,
-    pub(crate) state: HealthState,
-    pub(crate) source: Source,
-    pub(crate) pid: Option<u32>,
-    pub(crate) unit: Option<UnitName>,
-    pub(crate) port_open: bool,
-    pub(crate) uptime_sec: Option<u64>,
-    pub(crate) error: Option<StatusError>,
+pub struct StatusRow {
+    pub id: String,
+    pub name: String,
+    pub group: String,
+    pub instance: String,
+    pub address: String,
+    pub port: u16,
+    pub private_ip: bool,
+    pub enabled: bool,
+    pub state: HealthState,
+    pub source: Source,
+    pub pid: Option<u32>,
+    pub unit: Option<UnitName>,
+    pub port_open: bool,
+    pub uptime_sec: Option<u64>,
+    pub error: Option<StatusError>,
 }
 
 /// Per-group counters inside the Status document's `groups` map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-pub(crate) struct GroupCounts {
-    pub(crate) running: u32,
-    pub(crate) starting: u32,
-    pub(crate) error: u32,
-    pub(crate) stopped: u32,
-    pub(crate) total: u32,
+pub struct GroupCounts {
+    pub running: u32,
+    pub starting: u32,
+    pub error: u32,
+    pub stopped: u32,
+    pub total: u32,
 }
 
 /// The `status --json` document (`docs/status-document.v1.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct StatusDocument {
-    pub(crate) version: u32,
-    pub(crate) ts: String,
-    pub(crate) cli_version: String,
-    pub(crate) running: u32,
-    pub(crate) starting: u32,
-    pub(crate) error: u32,
-    pub(crate) stopped: u32,
-    pub(crate) total: u32,
-    pub(crate) groups: std::collections::BTreeMap<String, GroupCounts>,
-    pub(crate) connections: Vec<StatusRow>,
+pub struct StatusDocument {
+    pub version: u32,
+    pub ts: String,
+    pub cli_version: String,
+    pub running: u32,
+    pub starting: u32,
+    pub error: u32,
+    pub stopped: u32,
+    pub total: u32,
+    pub groups: std::collections::BTreeMap<String, GroupCounts>,
+    pub connections: Vec<StatusRow>,
 }
 
 /// One `doctor` check's severity (`docs/doctor.v1.md`).
@@ -335,7 +335,7 @@ pub(crate) struct StatusDocument {
 /// (`docs/doctor.v1.md`, "`checks[]` element").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum CheckStatus {
+pub enum CheckStatus {
     Pass,
     Warn,
     Fail,
@@ -343,11 +343,11 @@ pub(crate) enum CheckStatus {
 
 /// One `doctor --json` `checks[]` element.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct CheckRow {
-    pub(crate) id: String,
-    pub(crate) status: CheckStatus,
-    pub(crate) detail: String,
-    pub(crate) hint: Option<String>,
+pub struct CheckRow {
+    pub id: String,
+    pub status: CheckStatus,
+    pub detail: String,
+    pub hint: Option<String>,
 }
 
 impl CheckRow {
@@ -355,24 +355,24 @@ impl CheckRow {
         id: impl Into<String>,
         status: CheckStatus,
         detail: impl AsRef<str>,
-        hint: Option<impl AsRef<str>>,
+        hint: Option<&str>,
     ) -> Self {
         Self {
             id: id.into(),
             status,
             detail: clamp_utf8(detail.as_ref(), MAX_DETAIL_LEN).to_string(),
-            hint: hint.map(|h| clamp_utf8(h.as_ref(), MAX_DETAIL_LEN).to_string()),
+            hint: hint.map(|h| clamp_utf8(h, MAX_DETAIL_LEN).to_string()),
         }
     }
 }
 
 /// The `doctor --json` document (`docs/doctor.v1.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct DoctorReport {
-    pub(crate) version: u32,
-    pub(crate) cli_version: String,
-    pub(crate) ok: bool,
-    pub(crate) checks: Vec<CheckRow>,
+pub struct DoctorReport {
+    pub version: u32,
+    pub cli_version: String,
+    pub ok: bool,
+    pub checks: Vec<CheckRow>,
 }
 
 #[cfg(test)]

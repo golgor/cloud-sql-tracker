@@ -45,9 +45,14 @@ use crate::model::{
     self, CheckStatus, DoctorReport, ErrorCode, HealthState, Source, StatusDocument,
 };
 
+#[cfg(test)]
+pub mod model_for_tests {
+    pub use crate::model::*;
+}
+
 /// Output caps (`docs/cli-contract.v1.md`).
-pub(crate) const STATUS_MAX_BYTES: usize = 262_144; // 256 KiB
-pub(crate) const DOCTOR_MAX_BYTES: usize = 65_536; // 64 KiB
+const STATUS_MAX_BYTES: usize = 262_144; // 256 KiB
+const DOCTOR_MAX_BYTES: usize = 65_536; // 64 KiB
 
 /// `--lines`'s default for `logs` (`docs/cli-contract.v1.md`, "`logs`").
 const DEFAULT_LOG_LINES: u32 = 100;
@@ -253,15 +258,14 @@ fn run_status(config_path: &Path, selector_args: SelectorArgs, json: bool) -> i3
     };
     match commands::status(&config, &selector) {
         Ok(document) => {
-            if json {
-                if print_status_json(&document) {
-                    0
-                } else {
-                    3
-                }
-            } else {
+            if !json {
                 print_status_text(&document);
+                return 0;
+            }
+            if print_status_json(&document).is_ok() {
                 0
+            } else {
+                3
             }
         }
         Err(err) => status_error_exit(&err),
@@ -286,17 +290,36 @@ fn status_error_exit(err: &StatusCommandError) -> i32 {
     }
 }
 
-pub(crate) fn print_status_json(document: &StatusDocument) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum OutputCapError {
+    CapExceeded { cap: usize },
+}
+
+fn write_status_json<W: std::io::Write>(
+    document: &StatusDocument,
+    mut writer: W,
+) -> Result<(), OutputCapError> {
     let text = serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
-    if text.len() <= STATUS_MAX_BYTES {
-        println!("{text}");
-        true
+    let bytes = text.as_bytes();
+    if bytes.len() <= STATUS_MAX_BYTES {
+        writer.write_all(bytes).expect("stdout write succeeds");
+        assert!(
+            bytes.len() <= STATUS_MAX_BYTES,
+            "stdout output invariant violated"
+        );
+        Ok(())
     } else {
         eprintln!(
             "error: status document exceeds maximum allowed output size ({STATUS_MAX_BYTES} bytes)"
         );
-        false
+        Err(OutputCapError::CapExceeded {
+            cap: STATUS_MAX_BYTES,
+        })
     }
+}
+
+fn print_status_json(document: &StatusDocument) -> Result<(), OutputCapError> {
+    write_status_json(document, std::io::stdout().lock())
 }
 
 fn print_status_text(document: &StatusDocument) {
@@ -501,37 +524,45 @@ fn run_doctor(config_path: &Path, json: bool) -> i32 {
     // (`docs/doctor.v1.md`, "Config load path"): it takes the path, not an
     // already-loaded `Config`.
     let report = commands::doctor(config_path);
-    if json {
-        if print_doctor_json(&report) {
-            if report.ok {
-                0
-            } else {
-                3
-            }
-        } else {
-            3
-        }
-    } else {
+    if !json {
         print_doctor_text(&report);
-        if report.ok {
-            0
-        } else {
-            3
-        }
+        return if report.ok { 0 } else { 3 };
+    }
+    if print_doctor_json(&report).is_err() {
+        return 3;
+    }
+    if report.ok {
+        0
+    } else {
+        3
     }
 }
 
-pub(crate) fn print_doctor_json(report: &DoctorReport) -> bool {
+fn write_doctor_json<W: std::io::Write>(
+    report: &DoctorReport,
+    mut writer: W,
+) -> Result<(), OutputCapError> {
     let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
-    if text.len() <= DOCTOR_MAX_BYTES {
-        println!("{text}");
-        true
+    let bytes = text.as_bytes();
+    if bytes.len() <= DOCTOR_MAX_BYTES {
+        writer.write_all(bytes).expect("stdout write succeeds");
+        assert!(
+            bytes.len() <= DOCTOR_MAX_BYTES,
+            "stdout output invariant violated"
+        );
+        Ok(())
     } else {
         eprintln!(
             "error: doctor report exceeds maximum allowed output size ({DOCTOR_MAX_BYTES} bytes)"
         );
-        false
+        Err(OutputCapError::CapExceeded {
+            cap: DOCTOR_MAX_BYTES,
+        })
     }
+}
+
+fn print_doctor_json(report: &DoctorReport) -> Result<(), OutputCapError> {
+    write_doctor_json(report, std::io::stdout().lock())
 }
 
 fn print_doctor_text(report: &DoctorReport) {
@@ -766,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn print_status_json_rejects_document_over_max_bytes() {
+    fn write_status_json_rejects_document_over_max_bytes_and_writes_zero_bytes() {
         let over_cap_doc = StatusDocument {
             version: 1,
             ts: "2026-08-24T12:00:00Z".to_string(),
@@ -800,12 +831,22 @@ mod tests {
             }],
         };
 
-        // Output guard must reject document over STATUS_MAX_BYTES and return false
-        assert!(!print_status_json(&over_cap_doc));
+        let mut buf = Vec::new();
+        let res = write_status_json(&over_cap_doc, &mut buf);
+        assert_eq!(
+            res,
+            Err(OutputCapError::CapExceeded {
+                cap: STATUS_MAX_BYTES
+            })
+        );
+        assert!(
+            buf.is_empty(),
+            "rejected over-cap document must write zero bytes to supplied writer"
+        );
     }
 
     #[test]
-    fn print_doctor_json_rejects_report_over_max_bytes() {
+    fn write_doctor_json_rejects_report_over_max_bytes_and_writes_zero_bytes() {
         let over_cap_report = DoctorReport {
             version: 1,
             cli_version: "0.1.0".to_string(),
@@ -819,7 +860,17 @@ mod tests {
             }],
         };
 
-        // Output guard must reject report over DOCTOR_MAX_BYTES and return false
-        assert!(!print_doctor_json(&over_cap_report));
+        let mut buf = Vec::new();
+        let res = write_doctor_json(&over_cap_report, &mut buf);
+        assert_eq!(
+            res,
+            Err(OutputCapError::CapExceeded {
+                cap: DOCTOR_MAX_BYTES
+            })
+        );
+        assert!(
+            buf.is_empty(),
+            "rejected over-cap report must write zero bytes to supplied writer"
+        );
     }
 }
