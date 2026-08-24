@@ -45,7 +45,11 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "group": { "type": "string", "minLength": 1 },
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^-]"
+        },
         "instance": {
           "type": "string",
           "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$"
@@ -79,7 +83,8 @@
         "group": {
           "type": "string",
           "minLength": 1,
-          "description": "Group key for bulk actions and UI"
+          "pattern": "^[^-]",
+          "description": "Group key for bulk actions and UI. Must not start with '-' (clap reads a leading hyphen as an option)."
         },
         "instance": {
           "type": "string",

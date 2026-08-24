@@ -45,6 +45,7 @@ Independent from Status document `version` and from binary `cli_version`.
 
 - **Bump config `version`** when required fields change meaning, known keys are removed/renamed, or validation becomes incompatible.
 - Adding a **new optional known key** in a later config schema version is a deliberate schema bump (v1 is **closed** to unknown keys — see below).
+- Three validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
 
 ---
 
@@ -99,7 +100,7 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 |-------|----------|--------|
 | `id` | yes | `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1–64. Suffix of unit name `cloud-sql-proxy-<id>.service`. |
 | `name` | yes | Non-empty string (display label). |
-| `group` | yes | Non-empty string (free text; not a fixed enum). |
+| `group` | yes | Non-empty string (free text; not a fixed enum). The first character must not be `-`. |
 | `instance` | yes | Cloud SQL instance connection name: exactly three non-empty segments separated by `:` — `project:region:instance` (regex: `^[^:\s]+:[^:\s]+:[^:\s]+$`). |
 | `port` | yes | Integer **1024–65535**, and **not** in the reserved set (below). |
 | `address` | no | Non-empty string; default `127.0.0.1`. |
@@ -107,6 +108,26 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 | `auto_iam_authn` | no | Boolean; default `false` → proxy flag when true. |
 | `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Default `[]`. |
 | `enabled` | no | Boolean; default `true`. |
+
+### Decision: stricter field validation keeps schema version 1
+
+This change makes three inputs newly invalid. Each did load before this
+change:
+
+- `group` that starts with `-`.
+- `name: ""` (empty string).
+- `address: ""` (empty string), including `defaults.address: ""`.
+
+**Pick:** `version` stays `1`.
+
+**Why:** the project is still in development (pre-1.0). A stricter rule on
+an already-required field is not a new shape.
+
+**Discarded:** bump to `version: 2`. Rejected because the project is
+pre-1.0 and still in development.
+
+**Unchanged:** the `status --json` document shape and the defaults merge
+order are not affected.
 
 ### Reserved ports (hard errors)
 
