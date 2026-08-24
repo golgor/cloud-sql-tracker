@@ -45,7 +45,7 @@ Independent from Status document `version` and from binary `cli_version`.
 
 - **Bump config `version`** when required fields change meaning, known keys are removed/renamed, or validation becomes incompatible.
 - Adding a **new optional known key** in a later config schema version is a deliberate schema bump (v1 is **closed** to unknown keys — see below).
-- Three validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
+- Four validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
 
 ---
 
@@ -56,7 +56,7 @@ Independent from Status document `version` and from binary `cli_version`.
 | `version` | yes | — | Must be integer `1`. |
 | `proxy_bin` | no | `"cloud-sql-proxy"` | Binary name on `PATH` or absolute path. |
 | `defaults` | no | `{}` | Object merged under each connection (see merge). |
-| `connections` | yes | — | Array of connection objects. May be empty `[]`. |
+| `connections` | yes | — | Array of connection objects. May be empty `[]`. Maximum **32** Connections. Counts every row, including `enabled: false`. Over the limit fails the whole document (all-or-nothing), same as any other validation error. |
 
 ### Strict keys
 
@@ -111,12 +111,13 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 
 ### Decision: stricter field validation keeps schema version 1
 
-This change makes three inputs newly invalid. Each did load before this
+This change makes four inputs newly invalid. Each did load before this
 change:
 
 - `group` that starts with `-`.
 - `name: ""` (empty string).
 - `address: ""` (empty string), including `defaults.address: ""`.
+- More than 32 Connections in the `connections` array.
 
 **Pick:** `version` stays `1`.
 
