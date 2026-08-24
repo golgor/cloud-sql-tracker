@@ -48,7 +48,7 @@
         "group": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^[^-].*$"
+          "pattern": "^[^-]"
         },
         "instance": {
           "type": "string",
@@ -83,7 +83,7 @@
         "group": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^[^-].*$",
+          "pattern": "^[^-]",
           "description": "Group key for bulk actions and UI. Must not start with '-' (clap reads a leading hyphen as an option)."
         },
         "instance": {

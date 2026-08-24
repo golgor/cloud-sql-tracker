@@ -45,6 +45,7 @@ Independent from Status document `version` and from binary `cli_version`.
 
 - **Bump config `version`** when required fields change meaning, known keys are removed/renamed, or validation becomes incompatible.
 - Adding a **new optional known key** in a later config schema version is a deliberate schema bump (v1 is **closed** to unknown keys — see below).
+- Three validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
 
 ---
 
@@ -108,14 +109,25 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 | `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Default `[]`. |
 | `enabled` | no | Boolean; default `true`. |
 
-### Decision: the `group` leading-hyphen rule keeps schema version 1
+### Decision: stricter field validation keeps schema version 1
 
-A leading `-` in `group` did load before this rule. So this rule is a
-restriction, not an addition. In the strict sense, it is a breaking change to
-the config schema.
+This change makes three inputs newly invalid. Each did load before this
+change:
 
-`version` stays `1`. The project is still in development. A later reader must
-not treat the missing version bump as a mistake.
+- `group` that starts with `-`.
+- `name: ""` (empty string).
+- `address: ""` (empty string), including `defaults.address: ""`.
+
+**Pick:** `version` stays `1`.
+
+**Why:** the project is still in development (pre-1.0). A stricter rule on
+an already-required field is not a new shape.
+
+**Discarded:** bump to `version: 2`. Rejected because the project is
+pre-1.0 and still in development.
+
+**Unchanged:** the `status --json` document shape and the defaults merge
+order are not affected.
 
 ### Reserved ports (hard errors)
 

@@ -213,14 +213,20 @@ fn invalid(id: &str, reason: impl Into<String>) -> ConfigError {
     }
 }
 
-/// Non-empty (`docs/config.v1.md`, "Connection fields"). Free text
-/// otherwise; no charset rule beyond that.
-fn validate_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        Err("name must not be empty".to_string())
+/// Shared non-empty check for `name`, `group`, and `address`
+/// (`docs/config.v1.md`, "Connection fields").
+fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        Err(format!("{field} must not be empty"))
     } else {
         Ok(())
     }
+}
+
+/// Non-empty (`docs/config.v1.md`, "Connection fields"). Free text
+/// otherwise; no charset rule beyond that.
+fn validate_name(name: &str) -> Result<(), String> {
+    require_non_empty("name", name)
 }
 
 /// Non-empty and must not start with `-` (`docs/config.v1.md`,
@@ -228,9 +234,8 @@ fn validate_name(name: &str) -> Result<(), String> {
 /// A leading `-` is rejected because clap reads it as an option, not a
 /// value, so `--group -legacy` could never reach this Connection.
 fn validate_group(group: &str) -> Result<(), String> {
-    if group.is_empty() {
-        Err("group must not be empty".to_string())
-    } else if group.starts_with('-') {
+    require_non_empty("group", group)?;
+    if group.starts_with('-') {
         Err(format!("group `{group}` must not start with '-'"))
     } else {
         Ok(())
@@ -240,11 +245,7 @@ fn validate_group(group: &str) -> Result<(), String> {
 /// Non-empty after the defaults merge (`docs/config.v1.md`, "Connection
 /// fields"). Free text otherwise.
 fn validate_address(address: &str) -> Result<(), String> {
-    if address.is_empty() {
-        Err("address must not be empty".to_string())
-    } else {
-        Ok(())
-    }
+    require_non_empty("address", address)
 }
 
 /// `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1-64 (`docs/config.v1.md`,
@@ -471,6 +472,43 @@ mod tests {
         assert_eq!(config.connections[0].group, "Prod EU (read only)");
     }
 
+    /// `starts_with('-')` checks the leading `char`, not the leading byte.
+    /// A multi-byte first character (`ü`) must load, and a look-alike dash
+    /// that is not ASCII `-` (U+2013 en dash) must also load. Locks the
+    /// char-vs-byte behavior so a future `as_bytes()[0]` "optimization"
+    /// fails loudly.
+    #[test]
+    fn parse_accepts_a_group_with_a_multi_byte_first_character() {
+        let json = r#"{
+            "version": 1,
+            "connections": [
+                {"id": "a", "name": "A", "group": "über", "instance": "p:r:i1", "port": 15432},
+                {"id": "b", "name": "B", "group": "–legacy", "instance": "p:r:i2", "port": 15433}
+            ]
+        }"#;
+        let config = parse(json.as_bytes()).expect("multi-byte first character must load");
+        assert_eq!(config.connections[0].group, "über");
+        assert_eq!(config.connections[1].group, "–legacy");
+    }
+
+    /// `schemas/config.v1.json` `group` pattern is `^[^-]` (anchored at the
+    /// start, no `$`/`.*` reach across lines). `^[^-].*$` without the `m`
+    /// flag rejected a value containing `\n` even though Rust's
+    /// `validate_group` accepts any non-empty, non-dash-led string. Locks
+    /// that a newline in `group` parses in Rust; see the acceptance report
+    /// for the matching `check-jsonschema` run against the schema file.
+    #[test]
+    fn parse_accepts_a_group_containing_a_newline() {
+        let json = r#"{
+            "version": 1,
+            "connections": [
+                {"id": "a", "name": "A", "group": "line1\nline2", "instance": "p:r:i", "port": 15432}
+            ]
+        }"#;
+        let config = parse(json.as_bytes()).expect("a group containing a newline must load");
+        assert_eq!(config.connections[0].group, "line1\nline2");
+    }
+
     #[test]
     fn parse_rejects_an_empty_group() {
         let json = r#"{
@@ -480,7 +518,7 @@ mod tests {
             ]
         }"#;
         let err = parse(json.as_bytes()).expect_err("an empty group must reject");
-        assert!(matches!(err, ConfigError::InvalidConnection { .. }));
+        assert_eq!(err.to_string(), "connection `a`: group must not be empty");
     }
 
     #[test]
@@ -492,7 +530,7 @@ mod tests {
             ]
         }"#;
         let err = parse(json.as_bytes()).expect_err("an empty name must reject");
-        assert!(matches!(err, ConfigError::InvalidConnection { .. }));
+        assert_eq!(err.to_string(), "connection `a`: name must not be empty");
     }
 
     #[test]
@@ -504,7 +542,7 @@ mod tests {
             ]
         }"#;
         let err = parse(json.as_bytes()).expect_err("an empty address must reject");
-        assert!(matches!(err, ConfigError::InvalidConnection { .. }));
+        assert_eq!(err.to_string(), "connection `a`: address must not be empty");
     }
 
     #[test]
