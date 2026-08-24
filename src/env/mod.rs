@@ -61,12 +61,12 @@ pub(crate) fn proxy_bin_check(configured: Option<&str>) -> CheckRow {
 /// version probe on start's happy path, which `docs/doctor.v1.md` reserves
 /// for doctor).
 pub(crate) fn check_row_for_proxy_bin_resolve_error(err: ProxyBinError) -> CheckRow {
-    CheckRow {
-        id: "proxy_bin".to_string(),
-        status: CheckStatus::Fail,
-        detail: err.to_string(),
-        hint: Some(PROXY_BIN_INSTALL_HINT.to_string()),
-    }
+    CheckRow::new(
+        "proxy_bin",
+        CheckStatus::Fail,
+        err.to_string(),
+        Some(PROXY_BIN_INSTALL_HINT),
+    )
 }
 
 /// Assemble the doctor row after a successful path resolve, from the
@@ -77,18 +77,18 @@ fn check_row_for_proxy_bin_probe(
     probe: Result<String, ProxyVersionError>,
 ) -> CheckRow {
     match probe {
-        Ok(version) => CheckRow {
-            id: "proxy_bin".to_string(),
-            status: CheckStatus::Pass,
-            detail: format_proxy_bin_pass_detail(path, &version),
-            hint: None,
-        },
-        Err(err) => CheckRow {
-            id: "proxy_bin".to_string(),
-            status: CheckStatus::Fail,
-            detail: format_proxy_version_fail_detail(path, &err),
-            hint: Some(err.hint().to_string()),
-        },
+        Ok(version) => CheckRow::new(
+            "proxy_bin",
+            CheckStatus::Pass,
+            format_proxy_bin_pass_detail(path, &version),
+            None::<&str>,
+        ),
+        Err(err) => CheckRow::new(
+            "proxy_bin",
+            CheckStatus::Fail,
+            format_proxy_version_fail_detail(path, &err),
+            Some(err.hint()),
+        ),
     }
 }
 
@@ -212,25 +212,25 @@ pub(crate) fn adc_check() -> CheckRow {
 }
 
 fn check_row_for_adc(status: AdcStatus) -> CheckRow {
-    let id = "adc".to_string();
+    let id = "adc";
     if status.present {
         // `present` is only ever true alongside a path (see
         // `resolve_adc_status`); `display_path` still handles `None` so
         // this function cannot panic.
-        return CheckRow {
+        return CheckRow::new(
             id,
-            status: CheckStatus::Pass,
-            detail: display_path(status.path.as_deref()),
-            hint: None,
-        };
+            CheckStatus::Pass,
+            display_path(status.path.as_deref()),
+            None::<&str>,
+        );
     }
 
-    CheckRow {
+    CheckRow::new(
         id,
-        status: CheckStatus::Fail,
-        detail: missing_adc_detail(&status),
-        hint: Some(ADC_HINT.to_string()),
-    }
+        CheckStatus::Fail,
+        missing_adc_detail(&status),
+        Some(ADC_HINT),
+    )
 }
 
 /// [`adc_status`]'s resolution, taking `HOME` and

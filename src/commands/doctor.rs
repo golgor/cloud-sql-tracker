@@ -23,6 +23,8 @@ use crate::model::{
 use crate::supervisor::{self, UnitSnapshot};
 use crate::{env, journal, port};
 
+pub(crate) const MAX_DOCTOR_CHECKS: usize = 6;
+
 /// Run every Doctor check for the config at `cfg_path`
 /// (`docs/doctor.v1.md`, "Recommended check order"). `cli` (#45) resolves
 /// `cfg_path` (`--config` or the default XDG path) before calling this.
@@ -47,6 +49,11 @@ pub(crate) fn doctor(cfg_path: &Path) -> DoctorReport {
         journal::journal_user_check(),
         ports_check(config),
     ];
+    assert!(
+        checks.len() <= MAX_DOCTOR_CHECKS,
+        "Doctor report checks count ({}) exceeds maximum ({MAX_DOCTOR_CHECKS})",
+        checks.len()
+    );
     let ok = all_checks_ok(&checks);
 
     DoctorReport {
@@ -70,25 +77,22 @@ fn all_checks_ok(checks: &[CheckRow]) -> bool {
 /// is this one row's `fail`, never a process exit.
 fn config_check(path: &Path, loaded: &Result<Config, ConfigError>) -> CheckRow {
     match loaded {
-        Ok(config) => CheckRow {
-            id: "config".to_string(),
-            status: CheckStatus::Pass,
-            detail: format!(
+        Ok(config) => CheckRow::new(
+            "config",
+            CheckStatus::Pass,
+            format!(
                 "{} ({} connections)",
                 path.display(),
                 config.connections.len()
             ),
-            hint: None,
-        },
-        Err(err) => CheckRow {
-            id: "config".to_string(),
-            status: CheckStatus::Fail,
-            detail: format!("{}: {err}", path.display()),
-            hint: Some(
-                "See docs/config.v1.md and examples/connections.json for a valid config."
-                    .to_string(),
-            ),
-        },
+            None::<&str>,
+        ),
+        Err(err) => CheckRow::new(
+            "config",
+            CheckStatus::Fail,
+            format!("{}: {err}", path.display()),
+            Some("See docs/config.v1.md and examples/connections.json for a valid config."),
+        ),
     }
 }
 
@@ -101,12 +105,12 @@ fn ports_check(config: Option<&Config>) -> CheckRow {
         // "Requires a successfully loaded config. Otherwise skipped ...
         // preferred: `ports` = `pass`, detail `skipped: config not
         // loaded`" (`docs/doctor.v1.md`, "`ports` — warn only").
-        return CheckRow {
-            id: "ports".to_string(),
-            status: CheckStatus::Pass,
-            detail: "skipped: config not loaded".to_string(),
-            hint: None,
-        };
+        return CheckRow::new(
+            "ports",
+            CheckStatus::Pass,
+            "skipped: config not loaded",
+            None::<&str>,
+        );
     };
 
     let conflicts: Vec<String> = config
@@ -116,23 +120,22 @@ fn ports_check(config: Option<&Config>) -> CheckRow {
         .collect();
 
     if conflicts.is_empty() {
-        CheckRow {
-            id: "ports".to_string(),
-            status: CheckStatus::Pass,
-            detail: "no port conflicts".to_string(),
-            hint: None,
-        }
+        CheckRow::new(
+            "ports",
+            CheckStatus::Pass,
+            "no port conflicts",
+            None::<&str>,
+        )
     } else {
-        CheckRow {
-            id: "ports".to_string(),
-            status: CheckStatus::Warn,
-            detail: conflicts.join("; "),
-            hint: Some(
+        CheckRow::new(
+            "ports",
+            CheckStatus::Warn,
+            conflicts.join("; "),
+            Some(
                 "Free the port (stop the leftover process) before start, or change the \
-                 Connection port in config."
-                    .to_string(),
+                 Connection port in config.",
             ),
-        }
+        )
     }
 }
 
@@ -276,12 +279,7 @@ mod tests {
     }
 
     fn check_row(id: &str, status: CheckStatus) -> CheckRow {
-        CheckRow {
-            id: id.to_string(),
-            status,
-            detail: String::new(),
-            hint: None,
-        }
+        CheckRow::new(id, status, "", None::<&str>)
     }
 
     // -- all_checks_ok: the one ⇔ rule in docs/doctor.v1.md's Invariant ------
@@ -476,24 +474,24 @@ mod tests {
             cli_version: "0.1.0".to_string(),
             ok: false,
             checks: vec![
-                CheckRow {
-                    id: "config".to_string(),
-                    status: CheckStatus::Pass,
-                    detail: "/home/you/connections.json (2 connections)".to_string(),
-                    hint: None,
-                },
-                CheckRow {
-                    id: "adc".to_string(),
-                    status: CheckStatus::Fail,
-                    detail: "no Application Default Credentials file".to_string(),
-                    hint: Some("gcloud auth application-default login".to_string()),
-                },
-                CheckRow {
-                    id: "ports".to_string(),
-                    status: CheckStatus::Warn,
-                    detail: "fe-dev port 15434 held by pid 12002; not our unit".to_string(),
-                    hint: Some("Free the port before start.".to_string()),
-                },
+                CheckRow::new(
+                    "config",
+                    CheckStatus::Pass,
+                    "/home/you/connections.json (2 connections)",
+                    None::<&str>,
+                ),
+                CheckRow::new(
+                    "adc",
+                    CheckStatus::Fail,
+                    "no Application Default Credentials file",
+                    Some("gcloud auth application-default login"),
+                ),
+                CheckRow::new(
+                    "ports",
+                    CheckStatus::Warn,
+                    "fe-dev port 15434 held by pid 12002; not our unit",
+                    Some("Free the port before start."),
+                ),
             ],
         };
         let instance = serde_json::to_value(&report).expect("DoctorReport serializes");

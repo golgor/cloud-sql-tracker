@@ -840,10 +840,7 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::None,
-            Some(StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "held by pid 999".to_string(),
-            }),
+            Some(StatusError::new(ErrorCode::PortInUse, "held by pid 999")),
         );
         let result =
             start_idempotent_or_conflict(&row).expect("port_in_use must not proceed to start");
@@ -1267,10 +1264,7 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::None,
-            Some(StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "held by pid 999".to_string(),
-            }),
+            Some(StatusError::new(ErrorCode::PortInUse, "held by pid 999")),
         );
         assert_eq!(
             permanent_start_failure(&row),
@@ -1288,10 +1282,10 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::Unit,
-            Some(StatusError {
-                code: ErrorCode::StartTimeout,
-                detail: "unit is still activating after the start window".to_string(),
-            }),
+            Some(StatusError::new(
+                ErrorCode::StartTimeout,
+                "unit is still activating after the start window",
+            )),
         );
         assert_eq!(permanent_start_failure(&row), None);
     }
@@ -1319,10 +1313,7 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::None,
-            Some(StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "held by pid 999".to_string(),
-            }),
+            Some(StatusError::new(ErrorCode::PortInUse, "held by pid 999")),
         );
         let result = wait_step(
             &row,
@@ -1350,10 +1341,10 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::Unit,
-            Some(StatusError {
-                code: ErrorCode::StartTimeout,
-                detail: "unit is still activating after the start window".to_string(),
-            }),
+            Some(StatusError::new(
+                ErrorCode::StartTimeout,
+                "unit is still activating after the start window",
+            )),
         );
         let result = wait_step(
             &row,
@@ -1405,10 +1396,10 @@ mod tests {
         let row = row(
             HealthState::Error,
             Source::Unit,
-            Some(StatusError {
-                code: ErrorCode::StartTimeout,
-                detail: "unit is still activating after the start window".to_string(),
-            }),
+            Some(StatusError::new(
+                ErrorCode::StartTimeout,
+                "unit is still activating after the start window",
+            )),
         );
         let result = wait_step(
             &row,

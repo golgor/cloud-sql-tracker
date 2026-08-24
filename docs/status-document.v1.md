@@ -61,6 +61,16 @@ Schema compatibility and binary release cadence are different clocks. A new CLI 
 
 ---
 
+## Output Size Cap and Backstop
+
+The maximum output size for `status --json` is **256 KiB** (262,144 bytes).
+
+- Producer limits bound `connections` to at most 32 rows and string fields to capped lengths (`id` 64, `name` 64, `group` 32, `instance` 256, `address` 253 bytes).
+- `error.detail` strings are clamped at production seams to at most **512 UTF-8 bytes** (up to 3072 bytes in JSON output when escaped).
+- As a final backstop before stdout, `status --json` serializes the document in memory and checks its byte length against 262,144 bytes. If it exceeds 262,144 bytes, the CLI writes **no JSON** to stdout, prints an error to stderr, and exits **3**.
+
+---
+
 ## Top-level object
 
 | Field | Type | Required | Meaning |

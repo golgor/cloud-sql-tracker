@@ -54,7 +54,7 @@ Independent from Status document `version` and from binary `cli_version`.
 | Field | Required | Default | Meaning |
 |-------|----------|---------|---------|
 | `version` | yes | — | Must be integer `1`. |
-| `proxy_bin` | no | `"cloud-sql-proxy"` | Binary name on `PATH` or absolute path. |
+| `proxy_bin` | no | `"cloud-sql-proxy"` | Binary name on `PATH` or absolute path. Printable ASCII (`0x20`–`0x7E`), maximum **4095** bytes. |
 | `defaults` | no | `{}` | Object merged under each connection (see merge). |
 | `connections` | yes | — | Array of connection objects. May be empty `[]`. Maximum **32** Connections. Counts every row, including `enabled: false`. Over the limit fails the whole document (all-or-nothing), same as any other validation error. |
 
@@ -96,17 +96,19 @@ Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `
 
 ## Connection fields (after merge)
 
+All config strings use **printable ASCII** bytes `0x20` through `0x7E` (`name`, `group`, `instance`, `address`, `proxy_bin`, and each `extra_args` element). `id` uses its existing stricter charset rule.
+
 | Field | Required | Rules |
 |-------|----------|--------|
-| `id` | yes | `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1–64. Suffix of unit name `cloud-sql-proxy-<id>.service`. |
-| `name` | yes | Non-empty string (display label). |
-| `group` | yes | Non-empty string (free text; not a fixed enum). The first character must not be `-`. |
-| `instance` | yes | Cloud SQL instance connection name: exactly three non-empty segments separated by `:` — `project:region:instance` (regex: `^[^:\s]+:[^:\s]+:[^:\s]+$`). |
+| `id` | yes | `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1–64 bytes. Suffix of unit name `cloud-sql-proxy-<id>.service`. |
+| `name` | yes | Non-empty string (display label). Printable ASCII, maximum **64** bytes. |
+| `group` | yes | Non-empty string (free text; not a fixed enum). Printable ASCII, maximum **32** bytes. The first character must not be `-`. |
+| `instance` | yes | Cloud SQL instance connection name: exactly three non-empty segments separated by `:` — `project:region:instance` (regex: `^[^:\s]+:[^:\s]+:[^:\s]+$`). Printable ASCII, maximum **256** bytes. |
 | `port` | yes | Integer **1024–65535**, and **not** in the reserved set (below). |
-| `address` | no | Non-empty string; default `127.0.0.1`. |
+| `address` | no | Non-empty string; default `127.0.0.1`. Printable ASCII, maximum **253** bytes. |
 | `private_ip` | no | Boolean; default `false`. |
 | `auto_iam_authn` | no | Boolean; default `false` → proxy flag when true. |
-| `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Default `[]`. |
+| `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Maximum **16** elements, each element printable ASCII, total merged byte length across all elements maximum **2048** bytes. Default `[]`. |
 | `enabled` | no | Boolean; default `true`. |
 
 ### Decision: stricter field validation keeps schema version 1

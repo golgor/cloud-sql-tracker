@@ -253,11 +253,35 @@ pub(crate) enum ErrorCode {
     Unknown,
 }
 
+pub(crate) const MAX_DETAIL_LEN: usize = 512;
+
+/// Safely truncate `s` to at most `max_bytes` UTF-8 bytes without splitting a code point.
+pub(crate) fn clamp_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        s
+    } else {
+        let mut end = max_bytes;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
+}
+
 /// Present on a Status row only when `state == Error`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct StatusError {
     pub(crate) code: ErrorCode,
     pub(crate) detail: String,
+}
+
+impl StatusError {
+    pub(crate) fn new(code: ErrorCode, detail: impl AsRef<str>) -> Self {
+        Self {
+            code,
+            detail: clamp_utf8(detail.as_ref(), MAX_DETAIL_LEN).to_string(),
+        }
+    }
 }
 
 /// One `connections[]` element of the Status document.
@@ -324,6 +348,22 @@ pub(crate) struct CheckRow {
     pub(crate) status: CheckStatus,
     pub(crate) detail: String,
     pub(crate) hint: Option<String>,
+}
+
+impl CheckRow {
+    pub(crate) fn new(
+        id: impl Into<String>,
+        status: CheckStatus,
+        detail: impl AsRef<str>,
+        hint: Option<impl AsRef<str>>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            status,
+            detail: clamp_utf8(detail.as_ref(), MAX_DETAIL_LEN).to_string(),
+            hint: hint.map(|h| clamp_utf8(h.as_ref(), MAX_DETAIL_LEN).to_string()),
+        }
+    }
 }
 
 /// The `doctor --json` document (`docs/doctor.v1.md`).
@@ -400,5 +440,44 @@ mod tests {
             let name = unit_name(id).expect("golden ids are already unit-safe");
             assert_eq!(name.as_str(), format!("cloud-sql-proxy-{id}.service"));
         }
+    }
+
+    #[test]
+    fn clamp_utf8_preserves_char_boundary_and_bounds_bytes() {
+        let ascii = "a".repeat(600);
+        assert_eq!(clamp_utf8(&ascii, 512).len(), 512);
+
+        // Multi-byte UTF-8 string: 'é' is 2 bytes (0xC3, 0xA9)
+        // 1 byte 'a' + 300 * 2 bytes 'é' = 601 bytes
+        let multi_byte = format!("a{}", "é".repeat(300));
+        assert_eq!(multi_byte.len(), 601);
+
+        let clamped = clamp_utf8(&multi_byte, 512);
+        assert!(clamped.len() <= 512);
+        assert_eq!(clamped.len(), 511); // 1 + 255*2 = 511 bytes
+        assert!(std::str::from_utf8(clamped.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn status_error_clamps_detail_and_handles_6x_control_character_expansion() {
+        // 512 control character bytes (0x01)
+        let raw_controls = "\x01".repeat(600);
+        let err = StatusError::new(ErrorCode::Unknown, &raw_controls);
+        assert_eq!(err.detail.len(), 512);
+
+        // When serialized to JSON, '\x01' becomes "\u0001" (6 output bytes)
+        let json = serde_json::to_string(&err).expect("serializes");
+        // 512 * 6 = 3072 bytes plus JSON key overhead
+        assert!(json.contains("\\u0001"));
+        assert!(json.len() >= 3072);
+    }
+
+    #[test]
+    fn check_row_clamps_detail_and_hint() {
+        let long_detail = "d".repeat(600);
+        let long_hint = "h".repeat(600);
+        let row = CheckRow::new("config", CheckStatus::Fail, &long_detail, Some(&long_hint));
+        assert_eq!(row.detail.len(), 512);
+        assert_eq!(row.hint.as_ref().unwrap().len(), 512);
     }
 }

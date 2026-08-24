@@ -45,6 +45,10 @@ use crate::model::{
     self, CheckStatus, DoctorReport, ErrorCode, HealthState, Source, StatusDocument,
 };
 
+/// Output caps (`docs/cli-contract.v1.md`).
+pub(crate) const STATUS_MAX_BYTES: usize = 262_144; // 256 KiB
+pub(crate) const DOCTOR_MAX_BYTES: usize = 65_536; // 64 KiB
+
 /// `--lines`'s default for `logs` (`docs/cli-contract.v1.md`, "`logs`").
 const DEFAULT_LOG_LINES: u32 = 100;
 
@@ -249,8 +253,16 @@ fn run_status(config_path: &Path, selector_args: SelectorArgs, json: bool) -> i3
     };
     match commands::status(&config, &selector) {
         Ok(document) => {
-            print_status(&document, json);
-            0
+            if json {
+                if print_status_json(&document) {
+                    0
+                } else {
+                    3
+                }
+            } else {
+                print_status_text(&document);
+                0
+            }
         }
         Err(err) => status_error_exit(&err),
     }
@@ -274,14 +286,20 @@ fn status_error_exit(err: &StatusCommandError) -> i32 {
     }
 }
 
-fn print_status(document: &StatusDocument, json: bool) {
-    if json {
-        let text =
-            serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
+pub(crate) fn print_status_json(document: &StatusDocument) -> bool {
+    let text = serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
+    if text.len() <= STATUS_MAX_BYTES {
         println!("{text}");
-        return;
+        true
+    } else {
+        eprintln!(
+            "error: status document exceeds maximum allowed output size ({STATUS_MAX_BYTES} bytes)"
+        );
+        false
     }
+}
 
+fn print_status_text(document: &StatusDocument) {
     println!(
         "{} running, {} starting, {} error, {} stopped (of {})",
         document.running, document.starting, document.error, document.stopped, document.total
@@ -483,21 +501,40 @@ fn run_doctor(config_path: &Path, json: bool) -> i32 {
     // (`docs/doctor.v1.md`, "Config load path"): it takes the path, not an
     // already-loaded `Config`.
     let report = commands::doctor(config_path);
-    print_doctor(&report, json);
-    if report.ok {
-        0
+    if json {
+        if print_doctor_json(&report) {
+            if report.ok {
+                0
+            } else {
+                3
+            }
+        } else {
+            3
+        }
     } else {
-        3
+        print_doctor_text(&report);
+        if report.ok {
+            0
+        } else {
+            3
+        }
     }
 }
 
-fn print_doctor(report: &DoctorReport, json: bool) {
-    if json {
-        let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+pub(crate) fn print_doctor_json(report: &DoctorReport) -> bool {
+    let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+    if text.len() <= DOCTOR_MAX_BYTES {
         println!("{text}");
-        return;
+        true
+    } else {
+        eprintln!(
+            "error: doctor report exceeds maximum allowed output size ({DOCTOR_MAX_BYTES} bytes)"
+        );
+        false
     }
+}
 
+fn print_doctor_text(report: &DoctorReport) {
     for check in &report.checks {
         let status = match check.status {
             CheckStatus::Pass => "PASS",
@@ -726,5 +763,63 @@ mod tests {
     fn source_label_matches_the_status_document_wire_catalog() {
         assert_eq!(source_label(Source::Unit), "unit");
         assert_eq!(source_label(Source::None), "none");
+    }
+
+    #[test]
+    fn print_status_json_rejects_document_over_max_bytes() {
+        let over_cap_doc = StatusDocument {
+            version: 1,
+            ts: "2026-08-24T12:00:00Z".to_string(),
+            cli_version: "0.1.0".to_string(),
+            running: 0,
+            starting: 0,
+            error: 0,
+            stopped: 0,
+            total: 0,
+            groups: std::collections::BTreeMap::new(),
+            connections: vec![model::StatusRow {
+                id: "a".to_string(),
+                name: "A".to_string(),
+                group: "g".to_string(),
+                instance: "p:r:i".to_string(),
+                address: "127.0.0.1".to_string(),
+                port: 15432,
+                private_ip: false,
+                enabled: true,
+                state: HealthState::Error,
+                source: Source::None,
+                pid: None,
+                unit: None,
+                port_open: false,
+                uptime_sec: None,
+                error: Some(model::StatusError {
+                    code: ErrorCode::Unknown,
+                    // Direct construction bypassing clamp for test of stdout guard
+                    detail: "x".repeat(300_000),
+                }),
+            }],
+        };
+
+        // Output guard must reject document over STATUS_MAX_BYTES and return false
+        assert!(!print_status_json(&over_cap_doc));
+    }
+
+    #[test]
+    fn print_doctor_json_rejects_report_over_max_bytes() {
+        let over_cap_report = DoctorReport {
+            version: 1,
+            cli_version: "0.1.0".to_string(),
+            ok: true,
+            checks: vec![model::CheckRow {
+                id: "test".to_string(),
+                status: model::CheckStatus::Pass,
+                // Direct construction bypassing clamp for test of stdout guard
+                detail: "d".repeat(70_000),
+                hint: None,
+            }],
+        };
+
+        // Output guard must reject report over DOCTOR_MAX_BYTES and return false
+        assert!(!print_doctor_json(&over_cap_report));
     }
 }

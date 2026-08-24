@@ -440,3 +440,169 @@ fn unknown_top_level_key_is_rejected_by_the_schema_and_the_binary() {
         .expect("spawn the binary");
     assert_eq!(status.code(), Some(2));
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial maximum-size status --json and doctor --json tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_json_stdout_32_row_adversarial_max_config_stays_under_cap() {
+    let rows: Vec<String> = (0..32)
+        .map(|i| {
+            let id = format!("c{i}{}", "a".repeat(64 - 1 - format!("{i}").len()));
+            assert_eq!(id.len(), 64);
+            // printable ASCII name with quotes and backslashes for 2x JSON escaping
+            let name = format!("\"\\{}", "a".repeat(62));
+            assert_eq!(name.len(), 64);
+            let name_json = serde_json::to_string(&name).unwrap();
+            let group = format!("\"\\{}", "g".repeat(30));
+            assert_eq!(group.len(), 32);
+            let group_json = serde_json::to_string(&group).unwrap();
+            let instance = format!("proj:reg{i}:{}", "i".repeat(256 - 9 - format!("{i}").len()));
+            assert_eq!(instance.len(), 256);
+            let extra_args: Vec<String> = (0..16).map(|_| "x".repeat(128)).collect();
+            let json_args = serde_json::to_string(&extra_args).unwrap();
+
+            format!(
+                r#"{{"id": "{id}", "name": {name_json}, "group": {group_json}, "instance": "{instance}", "port": {port}, "extra_args": {json_args}}}"#,
+                port = 20000 + i
+            )
+        })
+        .collect();
+
+    let json_content = format!(r#"{{"version": 1, "connections": [{}]}}"#, rows.join(","));
+    let config = ConfigFixture::write(&json_content);
+
+    let output = bin()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("spawn binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "status --json 32-row adversarial config must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_bytes = &output.stdout;
+    assert!(
+        stdout_bytes.len() <= 262_144,
+        "stdout byte length {} exceeds 262144 bytes",
+        stdout_bytes.len()
+    );
+
+    let instance = parse_stdout_json(stdout_bytes);
+    assert_validates("schemas/status.v1.json", &instance);
+    assert_eq!(instance["total"], 32);
+    eprintln!(
+        "MEASURED: 32-row adversarial status JSON stdout size: {} bytes (cap: 262144)",
+        stdout_bytes.len()
+    );
+}
+
+#[test]
+fn benchmark_32_row_status_json() {
+    let rows: Vec<String> = (0..32)
+        .map(|i| {
+            let id = format!("c{i}{}", "a".repeat(64 - 1 - format!("{i}").len()));
+            let name = format!("\"\\{}", "a".repeat(62));
+            let name_json = serde_json::to_string(&name).unwrap();
+            let group = format!("\"\\{}", "g".repeat(30));
+            let group_json = serde_json::to_string(&group).unwrap();
+            let instance = format!("proj:reg{i}:{}", "i".repeat(256 - 9 - format!("{i}").len()));
+            let extra_args: Vec<String> = (0..16).map(|_| "x".repeat(128)).collect();
+            let json_args = serde_json::to_string(&extra_args).unwrap();
+
+            format!(
+                r#"{{"id": "{id}", "name": {name_json}, "group": {group_json}, "instance": "{instance}", "port": {port}, "extra_args": {json_args}}}"#,
+                port = 20000 + i
+            )
+        })
+        .collect();
+
+    let json_content = format!(r#"{{"version": 1, "connections": [{}]}}"#, rows.join(","));
+    let config = ConfigFixture::write(&json_content);
+
+    let count = 50;
+    let mut durations = Vec::with_capacity(count);
+
+    // Warmup
+    let _ = bin()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+        .output();
+
+    for _ in 0..count {
+        let start = std::time::Instant::now();
+        let output = bin()
+            .args([
+                "--config",
+                config.path().to_str().unwrap(),
+                "status",
+                "--json",
+            ])
+            .output()
+            .expect("spawn binary");
+        let elapsed = start.elapsed();
+        assert_eq!(output.status.code(), Some(0));
+        durations.push(elapsed);
+    }
+
+    durations.sort();
+    let median = durations[count / 2];
+    let median_ms = median.as_secs_f64() * 1000.0;
+    eprintln!(
+        "BENCHMARK: 32-row status --json over {count} runs - median: {:.2} ms",
+        median_ms
+    );
+}
+
+#[test]
+fn doctor_json_stdout_maximum_dynamic_text_stays_under_cap() {
+    let long_path_dir = "d".repeat(200);
+    let config = ConfigFixture::write(EMPTY_CONFIG);
+    let path_with_long_dir = config
+        .path()
+        .parent()
+        .unwrap()
+        .join(long_path_dir)
+        .join("conn.json");
+
+    let output = bin()
+        .args([
+            "--config",
+            path_with_long_dir.to_str().unwrap(),
+            "doctor",
+            "--json",
+        ])
+        .output()
+        .expect("spawn binary");
+
+    assert_eq!(output.status.code(), Some(3)); // config check fails for missing path -> exit 3
+
+    let stdout_bytes = &output.stdout;
+    assert!(
+        stdout_bytes.len() <= 65_536,
+        "stdout byte length {} exceeds 65536 bytes",
+        stdout_bytes.len()
+    );
+
+    let instance = parse_stdout_json(stdout_bytes);
+    assert_validates("schemas/doctor.v1.json", &instance);
+    assert_eq!(instance["ok"], false);
+    assert!(instance["checks"].as_array().unwrap().len() <= 6);
+    eprintln!(
+        "MEASURED: max Doctor JSON stdout size: {} bytes (cap: 65536)",
+        stdout_bytes.len()
+    );
+}

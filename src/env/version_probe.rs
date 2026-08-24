@@ -219,10 +219,15 @@ fn version_token_from_line(line: &str) -> Option<String> {
     }
 }
 
-/// A version-ish token has at least one ASCII digit (covers
-/// `2.25.2+linux.amd64` and plain `2.25.2`).
+const MAX_PROXY_VERSION_TOKEN_LEN: usize = 128;
+
+/// A version-ish token has at least one ASCII digit, printable ASCII, and is <= 128 bytes
+/// (covers `2.25.2+linux.amd64` and plain `2.25.2`).
 fn token_looks_like_version(token: &str) -> bool {
-    !token.is_empty() && token.chars().any(|c| c.is_ascii_digit())
+    !token.is_empty()
+        && token.len() <= MAX_PROXY_VERSION_TOKEN_LEN
+        && token.bytes().all(|b| (0x20..=0x7E).contains(&b))
+        && token.chars().any(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -434,5 +439,26 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "version probe took too long: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn parse_proxy_version_output_accepts_128_byte_token() {
+        // "v1" (2) + "0".repeat(126) = 128 bytes token
+        let token = format!("v1{}", "0".repeat(126));
+        assert_eq!(token.len(), 128);
+        let line = format!("cloud-sql-proxy version {token}\n");
+        let version = parse_proxy_version_output(line.as_bytes(), b"")
+            .expect("128-byte version token must parse");
+        assert_eq!(version, token);
+    }
+
+    #[test]
+    fn parse_proxy_version_output_rejects_129_byte_token() {
+        let token = format!("v1{}", "0".repeat(127));
+        assert_eq!(token.len(), 129);
+        let line = format!("cloud-sql-proxy version {token}\n");
+        let err = parse_proxy_version_output(line.as_bytes(), b"")
+            .expect_err("129-byte version token must reject");
+        assert!(matches!(err, ProxyVersionError::IdentityMismatch { .. }));
     }
 }

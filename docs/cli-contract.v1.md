@@ -223,6 +223,13 @@ cloud-sql-tracker doctor [--json]
 | stdout | Human summary **or** pure JSON when `--json` (never mix) |
 | stderr | Warnings, per-id errors, diagnostics |
 
+### JSON Output Caps
+
+- `status --json`: maximum **256 KiB** (262,144 bytes).
+- `doctor --json`: maximum **64 KiB** (65,536 bytes).
+
+If `status --json` or `doctor --json` exceeds its output cap during final serialization, the CLI writes **no JSON** to stdout, prints an error message to stderr, and exits **3** (Dependency / environmental backstop).
+
 ---
 
 ## Plugin minimum surface

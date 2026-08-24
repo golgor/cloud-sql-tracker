@@ -250,10 +250,10 @@ fn classify_activating(
     Outcome {
         state: HealthState::Error,
         source: Source::Unit,
-        error: Some(StatusError {
-            code: ErrorCode::StartTimeout,
-            detail: "unit is still activating after the start window".to_string(),
-        }),
+        error: Some(StatusError::new(
+            ErrorCode::StartTimeout,
+            "unit is still activating after the start window",
+        )),
     }
 }
 
@@ -291,10 +291,10 @@ fn classify_active(
     Outcome {
         state: HealthState::Error,
         source: Source::Unit,
-        error: Some(StatusError {
-            code: ErrorCode::UnitFailed,
-            detail: "unit is active but the port is still closed past the start window".to_string(),
-        }),
+        error: Some(StatusError::new(
+            ErrorCode::UnitFailed,
+            "unit is active but the port is still closed past the start window",
+        )),
     }
 }
 
@@ -352,10 +352,7 @@ fn classify_failed(signal: FailureSignal, unit: &UnitObservation, port_open: boo
     Outcome {
         state: HealthState::Error,
         source,
-        error: Some(StatusError {
-            code,
-            detail: failure_detail(kind).to_string(),
-        }),
+        error: Some(StatusError::new(code, failure_detail(kind))),
     }
 }
 
@@ -447,14 +444,14 @@ fn uptime_since(started_at: Option<SystemTime>, now: SystemTime) -> Option<u64> 
 
 /// `docs/reconcile.v1.md`, "Holder identity in errors".
 fn port_in_use_error(port_number: u16, port: &PortObservation) -> StatusError {
-    StatusError {
-        code: ErrorCode::PortInUse,
-        detail: port_in_use_detail(
+    StatusError::new(
+        ErrorCode::PortInUse,
+        port_in_use_detail(
             port_number,
             port.listener_pid,
             port.listener_name.as_deref(),
         ),
-    }
+    )
 }
 
 fn port_in_use_detail(

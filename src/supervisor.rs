@@ -431,18 +431,18 @@ pub(crate) fn stop(unit: &UnitName) -> Result<(), SupervisorError> {
 /// hard"): can this environment reach the systemd user manager at all.
 pub(crate) fn systemd_user_check() -> CheckRow {
     match manager_version() {
-        Ok(version) => CheckRow {
-            id: "systemd_user".to_string(),
-            status: CheckStatus::Pass,
-            detail: format!("user bus ok (systemd {version})"),
-            hint: None,
-        },
-        Err(err) => CheckRow {
-            id: "systemd_user".to_string(),
-            status: CheckStatus::Fail,
-            detail: err.to_string(),
-            hint: Some(SYSTEMD_USER_HINT.to_string()),
-        },
+        Ok(version) => CheckRow::new(
+            "systemd_user",
+            CheckStatus::Pass,
+            format!("user bus ok (systemd {version})"),
+            None::<&str>,
+        ),
+        Err(err) => CheckRow::new(
+            "systemd_user",
+            CheckStatus::Fail,
+            err.to_string(),
+            Some(SYSTEMD_USER_HINT),
+        ),
     }
 }
 
