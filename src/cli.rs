@@ -900,19 +900,23 @@ mod tests {
     fn status_json_fieldwise_maximum_document_stays_under_cap() {
         use model::*;
 
-        let mut groups = std::collections::BTreeMap::new();
-        for i in 0..32 {
-            let mut group_key = "\\".repeat(27);
+        fn max_group_key(i: usize) -> String {
+            let mut key = "\\".repeat(27);
             for bit in (0..5).rev() {
                 if (i >> bit) & 1 == 1 {
-                    group_key.push('"');
+                    key.push('"');
                 } else {
-                    group_key.push('\\');
+                    key.push('\\');
                 }
             }
-            assert_eq!(group_key.len(), 32);
+            assert_eq!(key.len(), 32);
+            key
+        }
+
+        let mut groups = std::collections::BTreeMap::new();
+        for i in 0..32 {
             groups.insert(
-                group_key,
+                max_group_key(i),
                 GroupCounts {
                     running: 0,
                     starting: 0,
@@ -929,16 +933,7 @@ mod tests {
             assert_eq!(id.len(), 64);
             let name = "\"\\".repeat(32);
             assert_eq!(name.len(), 64);
-
-            let mut group = "\\".repeat(27);
-            for bit in (0..5).rev() {
-                if (i >> bit) & 1 == 1 {
-                    group.push('"');
-                } else {
-                    group.push('\\');
-                }
-            }
-            assert_eq!(group.len(), 32);
+            let group = max_group_key(i);
 
             let instance = format!("\\:\\:{}", "\"\\".repeat(126));
             assert_eq!(instance.len(), 256);
@@ -970,9 +965,12 @@ mod tests {
         let cli_version = format!("0.1.0-{}", "a".repeat(58));
         assert_eq!(cli_version.len(), 64);
 
+        let ts = format!("2026-08-24T12:00:00.{}Z", "0".repeat(43));
+        assert_eq!(ts.len(), 64);
+
         let max_doc = StatusDocument {
             version: 1,
-            ts: "2026-08-24T12:00:00.000000000Z".to_string(),
+            ts,
             cli_version,
             running: 0,
             starting: 0,
