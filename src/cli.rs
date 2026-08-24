@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn status_json_fieldwise_maximum_document_stays_under_cap() {
+    fn status_json_producer_model_stress_fixture_stays_under_cap() {
         use model::*;
 
         fn max_group_key(i: usize) -> String {
@@ -1003,19 +1003,19 @@ mod tests {
         let stdout_bytes = text.as_bytes();
         assert!(
             stdout_bytes.len() <= STATUS_MAX_BYTES,
-            "fieldwise maximum status JSON length {} exceeds cap {}",
+            "producer-model stress fixture status JSON length {} exceeds cap {}",
             stdout_bytes.len(),
             STATUS_MAX_BYTES
         );
         eprintln!(
-            "MEASURED: fieldwise conservative hard upper-bound status JSON size: {} bytes (cap: {})",
+            "MEASURED: producer-model stress fixture status JSON size: {} bytes (cap: {})",
             stdout_bytes.len(),
             STATUS_MAX_BYTES
         );
     }
 
     #[test]
-    fn doctor_json_fieldwise_maximum_report_stays_under_cap() {
+    fn doctor_json_producer_model_stress_fixture_stays_under_cap() {
         use model::*;
 
         let check_ids = [
@@ -1065,12 +1065,12 @@ mod tests {
         let stdout_bytes = text.as_bytes();
         assert!(
             stdout_bytes.len() <= DOCTOR_MAX_BYTES,
-            "fieldwise maximum doctor JSON length {} exceeds cap {}",
+            "producer-model stress fixture doctor JSON length {} exceeds cap {}",
             stdout_bytes.len(),
             DOCTOR_MAX_BYTES
         );
         eprintln!(
-            "MEASURED: fieldwise conservative hard upper-bound Doctor JSON size: {} bytes (cap: {})",
+            "MEASURED: producer-model stress fixture Doctor JSON size: {} bytes (cap: {})",
             stdout_bytes.len(),
             DOCTOR_MAX_BYTES
         );
