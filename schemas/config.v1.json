@@ -52,30 +52,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64,
-          "pattern": "^[ -~]+$"
-        },
-        "group": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 32,
-          "allOf": [
-            { "pattern": "^[ -~]+$" },
-            { "pattern": "^[^-]" }
-          ]
-        },
-        "instance": {
-          "type": "string",
-          "maxLength": 256,
-          "allOf": [
-            { "pattern": "^[ -~]+$" },
-            { "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$" }
-          ]
-        },
-        "port": { "$ref": "#/$defs/port" },
         "address": {
           "type": "string",
           "minLength": 1,
@@ -87,7 +63,7 @@
         "extra_args": { "$ref": "#/$defs/extraArgs" },
         "enabled": { "type": "boolean" }
       },
-      "description": "Optional shared fields. id is not allowed in defaults (must be per-connection)."
+      "description": "Optional shared fields. Identity fields (id, name, group, instance, port) are not allowed in defaults."
     },
     "connectionObject": {
       "type": "object",

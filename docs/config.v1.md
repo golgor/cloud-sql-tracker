@@ -83,14 +83,16 @@ Applied as the base layer for every connection:
 
 ## Merge order
 
+Each input value is validated at its source (`defaults` block and connection object).
+
 For each element of `connections`:
 
 1. Start with **built-in defaults** (table above).  
 2. Overlay file-level **`defaults`** (object; only known keys allowed).  
 3. Overlay the **connection object** (connection wins on conflict).  
-4. **Validate** the merged connection (required fields, types, ranges, uniqueness).
+4. Construct the final connection. The merge is a strict pick-one choice per field, so the merged connection is valid by construction.
 
-Identity fields (`id`, `name`, `group`, `instance`, `port`) may appear in file `defaults` only if every connection still ends valid and unique after merge — unusual but allowed. In normal configs they are set per connection.
+File `defaults` holds optional fields only (`address`, `private_ip`, `auto_iam_authn`, `extra_args`, `enabled`). Identity fields (`id`, `name`, `group`, `instance`, `port`) belong on each Connection object.
 
 ---
 
@@ -111,7 +113,7 @@ All config strings use **printable ASCII** bytes `0x20` through `0x7E` (`name`, 
 | `extra_args` | no | Array of strings only (each arg already split; no shell parsing). Maximum **16** elements, each element printable ASCII, total merged byte length across all elements maximum **2048** bytes. Default `[]`. |
 | `enabled` | no | Boolean; default `true`. |
 
-### Decision: stricter field validation keeps schema version 1
+### Decision: stricter validation and source checks keep schema version 1
 
 Validation tightenings make these inputs newly invalid:
 
@@ -122,14 +124,15 @@ Validation tightenings make these inputs newly invalid:
 - Non-printable ASCII characters in string fields. All string fields require printable ASCII (`0x20`–`0x7E`).
 - String values exceeding byte caps (`id` 64 B, `name` 64 B, `group` 32 B, `instance` 256 B, `address` 253 B, `proxy_bin` 4095 B).
 - `extra_args` exceeding 16 elements or 2048 total bytes across all elements.
+- Identity fields (`name`, `group`, `instance`, `port`) in `defaults`.
 
-**Pick:** `version` stays `1`.
+**Pick:** validate every config value at its source (`defaults` block and connection object), remove identity fields from `defaults`, and keep config schema `version: 1`.
 
-**Why:** The project is in early development. Stricter validation on existing fields prevents invalid data without changing the document shape.
+**Why:** each value is checked once at its file location. An error names the block that is wrong. Required identity fields cannot be set in `defaults`.
 
-**Discarded:** Bump config schema to `version: 2`. Bump is not necessary for stricter validation in pre-1.0 development.
+**Discarded:** post-merge validation (validates values twice, and hides invalid defaults when overridden). Widening `RawDefaults` for identity fields (identity fields must be set per connection). Bumping config schema to `version: 2` (not necessary during pre-1.0 development).
 
-**Unchanged:** The `status --json` document shape and the defaults merge order do not change.
+**Unchanged:** the defaults merge order and field precedence do not change.
 
 ### Reserved ports (hard errors)
 
