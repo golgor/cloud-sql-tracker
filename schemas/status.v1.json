@@ -26,12 +26,14 @@
     "ts": {
       "type": "string",
       "format": "date-time",
+      "maxLength": 64,
       "description": "RFC 3339 timestamp when the snapshot was built."
     },
     "cli_version": {
       "type": "string",
       "minLength": 1,
-      "description": "Semver of the cloud-sql-tracker binary that produced this document."
+      "maxLength": 64,
+      "description": "Semver of the cloud-sql-tracker binary that produced this document. Maximum 64 bytes."
     },
     "running": {
       "type": "integer",
@@ -60,6 +62,15 @@
     },
     "groups": {
       "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 32,
+        "allOf": [
+          { "pattern": "^[ -~]+$" },
+          { "pattern": "^[^-]" }
+        ]
+      },
       "additionalProperties": {
         "$ref": "#/$defs/groupCounts"
       },
@@ -67,6 +78,7 @@
     },
     "connections": {
       "type": "array",
+      "maxItems": 32,
       "items": {
         "$ref": "#/$defs/connection"
       }
@@ -121,7 +133,8 @@
         },
         "detail": {
           "type": "string",
-          "description": "Human-readable explanation; wording may change without a schema bump."
+          "maxLength": 512,
+          "description": "Human-readable explanation; raw text clamped to at most 512 UTF-8 bytes."
         }
       }
     },
@@ -149,25 +162,42 @@
         "id": {
           "type": "string",
           "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
           "description": "Stable Connection id from config."
         },
         "name": {
           "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[ -~]+$",
           "description": "Display label."
         },
         "group": {
           "type": "string",
           "minLength": 1,
+          "maxLength": 32,
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^-]" }
+          ],
           "description": "Group key for bulk actions and UI grouping."
         },
         "instance": {
           "type": "string",
           "minLength": 1,
+          "maxLength": 256,
+          "allOf": [
+            { "pattern": "^[ -~]+$" },
+            { "pattern": "^[^:\\s]+:[^:\\s]+:[^:\\s]+$" }
+          ],
           "description": "Cloud SQL instance connection name (project:region:instance)."
         },
         "address": {
           "type": "string",
           "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[ -~]+$",
           "description": "Local listen address (typically 127.0.0.1)."
         },
         "port": {

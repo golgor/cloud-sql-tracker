@@ -15,7 +15,8 @@
     "cli_version": {
       "type": "string",
       "minLength": 1,
-      "description": "Semver of the cloud-sql-tracker binary that produced this document."
+      "maxLength": 64,
+      "description": "Semver of the cloud-sql-tracker binary that produced this document. Maximum 64 bytes."
     },
     "ok": {
       "type": "boolean",
@@ -23,8 +24,10 @@
     },
     "checks": {
       "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
       "items": { "$ref": "#/$defs/check" },
-      "description": "Ordered checklist results."
+      "description": "Ordered checklist results. Exactly 6 checks."
     }
   },
   "$defs": {
@@ -45,11 +48,13 @@
         },
         "detail": {
           "type": "string",
-          "description": "Human-readable outcome."
+          "maxLength": 512,
+          "description": "Human-readable outcome; raw text clamped to at most 512 UTF-8 bytes."
         },
         "hint": {
           "type": ["string", "null"],
-          "description": "Optional remediation or doc link; null when none."
+          "maxLength": 512,
+          "description": "Optional remediation or doc link; null when none. Raw text clamped to at most 512 UTF-8 bytes."
         }
       }
     }

@@ -45,6 +45,10 @@ use crate::model::{
     self, CheckStatus, DoctorReport, ErrorCode, HealthState, Source, StatusDocument,
 };
 
+/// Output caps (`docs/cli-contract.v1.md`).
+const STATUS_MAX_BYTES: usize = 262_144; // 256 KiB
+const DOCTOR_MAX_BYTES: usize = 65_536; // 64 KiB
+
 /// `--lines`'s default for `logs` (`docs/cli-contract.v1.md`, "`logs`").
 const DEFAULT_LOG_LINES: u32 = 100;
 
@@ -249,8 +253,15 @@ fn run_status(config_path: &Path, selector_args: SelectorArgs, json: bool) -> i3
     };
     match commands::status(&config, &selector) {
         Ok(document) => {
-            print_status(&document, json);
-            0
+            if !json {
+                print_status_text(&document);
+                return 0;
+            }
+            if print_status_json(&document).is_ok() {
+                0
+            } else {
+                3
+            }
         }
         Err(err) => status_error_exit(&err),
     }
@@ -274,14 +285,37 @@ fn status_error_exit(err: &StatusCommandError) -> i32 {
     }
 }
 
-fn print_status(document: &StatusDocument, json: bool) {
-    if json {
-        let text =
-            serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
-        println!("{text}");
-        return;
-    }
+#[derive(Debug, PartialEq, Eq)]
+enum OutputCapError {
+    CapExceeded { cap: usize },
+}
 
+fn write_status_json<W: std::io::Write>(
+    document: &StatusDocument,
+    mut writer: W,
+) -> Result<(), OutputCapError> {
+    let mut text =
+        serde_json::to_string_pretty(document).expect("StatusDocument always serializes");
+    text.push('\n');
+    let bytes = text.as_bytes();
+    if bytes.len() <= STATUS_MAX_BYTES {
+        writer.write_all(bytes).expect("stdout write succeeds");
+        Ok(())
+    } else {
+        eprintln!(
+            "error: status document exceeds maximum allowed output size ({STATUS_MAX_BYTES} bytes)"
+        );
+        Err(OutputCapError::CapExceeded {
+            cap: STATUS_MAX_BYTES,
+        })
+    }
+}
+
+fn print_status_json(document: &StatusDocument) -> Result<(), OutputCapError> {
+    write_status_json(document, std::io::stdout().lock())
+}
+
+fn print_status_text(document: &StatusDocument) {
     println!(
         "{} running, {} starting, {} error, {} stopped (of {})",
         document.running, document.starting, document.error, document.stopped, document.total
@@ -483,7 +517,13 @@ fn run_doctor(config_path: &Path, json: bool) -> i32 {
     // (`docs/doctor.v1.md`, "Config load path"): it takes the path, not an
     // already-loaded `Config`.
     let report = commands::doctor(config_path);
-    print_doctor(&report, json);
+    if !json {
+        print_doctor_text(&report);
+        return if report.ok { 0 } else { 3 };
+    }
+    if print_doctor_json(&report).is_err() {
+        return 3;
+    }
     if report.ok {
         0
     } else {
@@ -491,13 +531,31 @@ fn run_doctor(config_path: &Path, json: bool) -> i32 {
     }
 }
 
-fn print_doctor(report: &DoctorReport, json: bool) {
-    if json {
-        let text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
-        println!("{text}");
-        return;
+fn write_doctor_json<W: std::io::Write>(
+    report: &DoctorReport,
+    mut writer: W,
+) -> Result<(), OutputCapError> {
+    let mut text = serde_json::to_string_pretty(report).expect("DoctorReport always serializes");
+    text.push('\n');
+    let bytes = text.as_bytes();
+    if bytes.len() <= DOCTOR_MAX_BYTES {
+        writer.write_all(bytes).expect("stdout write succeeds");
+        Ok(())
+    } else {
+        eprintln!(
+            "error: doctor report exceeds maximum allowed output size ({DOCTOR_MAX_BYTES} bytes)"
+        );
+        Err(OutputCapError::CapExceeded {
+            cap: DOCTOR_MAX_BYTES,
+        })
     }
+}
 
+fn print_doctor_json(report: &DoctorReport) -> Result<(), OutputCapError> {
+    write_doctor_json(report, std::io::stdout().lock())
+}
+
+fn print_doctor_text(report: &DoctorReport) {
     for check in &report.checks {
         let status = match check.status {
             CheckStatus::Pass => "PASS",
@@ -726,5 +784,295 @@ mod tests {
     fn source_label_matches_the_status_document_wire_catalog() {
         assert_eq!(source_label(Source::Unit), "unit");
         assert_eq!(source_label(Source::None), "none");
+    }
+
+    #[test]
+    fn write_status_json_rejects_document_over_max_bytes_and_writes_zero_bytes() {
+        let over_cap_doc = StatusDocument {
+            version: 1,
+            ts: "2026-08-24T12:00:00Z".to_string(),
+            cli_version: "0.1.0".to_string(),
+            running: 0,
+            starting: 0,
+            error: 0,
+            stopped: 0,
+            total: 0,
+            groups: std::collections::BTreeMap::new(),
+            connections: vec![model::StatusRow {
+                id: "a".to_string(),
+                name: "A".to_string(),
+                group: "g".to_string(),
+                instance: "p:r:i".to_string(),
+                address: "127.0.0.1".to_string(),
+                port: 15432,
+                private_ip: false,
+                enabled: true,
+                state: HealthState::Error,
+                source: Source::None,
+                pid: None,
+                unit: None,
+                port_open: false,
+                uptime_sec: None,
+                error: Some(model::StatusError {
+                    code: ErrorCode::Unknown,
+                    // Direct construction bypassing clamp for test of stdout guard
+                    detail: "x".repeat(300_000),
+                }),
+            }],
+        };
+
+        let mut buf = Vec::new();
+        let res = write_status_json(&over_cap_doc, &mut buf);
+        assert_eq!(
+            res,
+            Err(OutputCapError::CapExceeded {
+                cap: STATUS_MAX_BYTES
+            })
+        );
+        assert!(
+            buf.is_empty(),
+            "rejected over-cap document must write zero bytes to supplied writer"
+        );
+    }
+
+    #[test]
+    fn write_doctor_json_rejects_report_over_max_bytes_and_writes_zero_bytes() {
+        let over_cap_report = DoctorReport {
+            version: 1,
+            cli_version: "0.1.0".to_string(),
+            ok: true,
+            checks: [
+                model::CheckRow {
+                    id: "test".to_string(),
+                    status: model::CheckStatus::Pass,
+                    // Direct construction bypassing clamp for test of stdout guard
+                    detail: "d".repeat(70_000),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c2".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c3".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c4".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c5".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+                model::CheckRow {
+                    id: "c6".to_string(),
+                    status: model::CheckStatus::Pass,
+                    detail: "".to_string(),
+                    hint: None,
+                },
+            ],
+        };
+
+        let mut buf = Vec::new();
+        let res = write_doctor_json(&over_cap_report, &mut buf);
+        assert_eq!(
+            res,
+            Err(OutputCapError::CapExceeded {
+                cap: DOCTOR_MAX_BYTES
+            })
+        );
+        assert!(
+            buf.is_empty(),
+            "rejected over-cap report must write zero bytes to supplied writer"
+        );
+    }
+
+    #[test]
+    fn status_json_producer_model_stress_fixture_stays_under_cap() {
+        use model::*;
+
+        fn max_group_key(i: usize) -> String {
+            let mut key = "\\".repeat(27);
+            for bit in (0..5).rev() {
+                if (i >> bit) & 1 == 1 {
+                    key.push('"');
+                } else {
+                    key.push('\\');
+                }
+            }
+            assert_eq!(key.len(), 32);
+            key
+        }
+
+        let mut groups = std::collections::BTreeMap::new();
+        for i in 0..32 {
+            groups.insert(
+                max_group_key(i),
+                GroupCounts {
+                    running: 0,
+                    starting: 0,
+                    error: 1,
+                    stopped: 0,
+                    total: 1,
+                },
+            );
+        }
+
+        let mut connections = Vec::with_capacity(32);
+        for i in 0..32 {
+            let id = format!("c{:02}{}", i, "a".repeat(61));
+            assert_eq!(id.len(), 64);
+            let name = "\"\\".repeat(32);
+            assert_eq!(name.len(), 64);
+            let group = max_group_key(i);
+
+            let instance = format!("\\:\\:{}", "\"\\".repeat(126));
+            assert_eq!(instance.len(), 256);
+            let address = format!("{}\"", "\"\\".repeat(126));
+            assert_eq!(address.len(), 253);
+
+            connections.push(StatusRow {
+                id: id.clone(),
+                name,
+                group,
+                instance,
+                address,
+                port: 65535,
+                private_ip: false,
+                enabled: false,
+                state: HealthState::Error,
+                source: Source::Unit,
+                pid: Some(u32::MAX),
+                unit: unit_name(&id).ok(),
+                port_open: false,
+                uptime_sec: Some(u64::MAX),
+                error: Some(StatusError {
+                    code: ErrorCode::StartTimeout,
+                    detail: "\x01".repeat(512),
+                }),
+            });
+        }
+
+        let cli_version = format!("0.1.0-{}", "a".repeat(58));
+        assert_eq!(cli_version.len(), 64);
+
+        let ts = format!("2026-08-24T12:00:00.{}Z", "0".repeat(43));
+        assert_eq!(ts.len(), 64);
+
+        let max_doc = StatusDocument {
+            version: 1,
+            ts,
+            cli_version,
+            running: 0,
+            starting: 0,
+            error: 32,
+            stopped: 0,
+            total: 32,
+            groups,
+            connections,
+        };
+
+        let mut text = serde_json::to_string_pretty(&max_doc).expect("serialize StatusDocument");
+        text.push('\n');
+        let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/status.v1.json");
+        let schema_text = std::fs::read_to_string(schema_path).expect("read the status schema");
+        let schema: serde_json::Value =
+            serde_json::from_str(&schema_text).expect("parse the status schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile the status schema");
+        let errors: Vec<String> = validator
+            .iter_errors(&json_val)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "status schema validation errors: {errors:?}"
+        );
+
+        let stdout_bytes = text.as_bytes();
+        assert!(
+            stdout_bytes.len() <= STATUS_MAX_BYTES,
+            "producer-model stress fixture status JSON length {} exceeds cap {}",
+            stdout_bytes.len(),
+            STATUS_MAX_BYTES
+        );
+        eprintln!(
+            "MEASURED: producer-model stress fixture status JSON size: {} bytes (cap: {})",
+            stdout_bytes.len(),
+            STATUS_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn doctor_json_producer_model_stress_fixture_stays_under_cap() {
+        use model::*;
+
+        let check_ids = [
+            "config",
+            "proxy_bin",
+            "systemd_user",
+            "adc",
+            "journal_user",
+            "ports",
+        ];
+        let checks: [CheckRow; 6] = std::array::from_fn(|i| CheckRow {
+            id: check_ids[i].to_string(),
+            status: CheckStatus::Fail,
+            detail: "\x01".repeat(512),
+            hint: Some("\x01".repeat(512)),
+        });
+
+        let cli_version = format!("0.1.0-{}", "a".repeat(58));
+        assert_eq!(cli_version.len(), 64);
+
+        let max_report = DoctorReport {
+            version: 1,
+            cli_version,
+            ok: false,
+            checks,
+        };
+
+        let mut text = serde_json::to_string_pretty(&max_report).expect("serialize DoctorReport");
+        text.push('\n');
+        let json_val: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+
+        let schema_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/doctor.v1.json");
+        let schema_text = std::fs::read_to_string(schema_path).expect("read the doctor schema");
+        let schema: serde_json::Value =
+            serde_json::from_str(&schema_text).expect("parse the doctor schema");
+        let validator = jsonschema::validator_for(&schema).expect("compile the doctor schema");
+        let errors: Vec<String> = validator
+            .iter_errors(&json_val)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "doctor schema validation errors: {errors:?}"
+        );
+
+        let stdout_bytes = text.as_bytes();
+        assert!(
+            stdout_bytes.len() <= DOCTOR_MAX_BYTES,
+            "producer-model stress fixture doctor JSON length {} exceeds cap {}",
+            stdout_bytes.len(),
+            DOCTOR_MAX_BYTES
+        );
+        eprintln!(
+            "MEASURED: producer-model stress fixture Doctor JSON size: {} bytes (cap: {})",
+            stdout_bytes.len(),
+            DOCTOR_MAX_BYTES
+        );
     }
 }

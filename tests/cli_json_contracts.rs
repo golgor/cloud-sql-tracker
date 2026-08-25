@@ -148,6 +148,10 @@ fn assert_validates(schema_relative_path: &str, instance: &serde_json::Value) {
 }
 
 fn parse_stdout_json(stdout: &[u8]) -> serde_json::Value {
+    assert!(
+        stdout.ends_with(b"\n"),
+        "stdout must end with a final newline"
+    );
     let text = std::str::from_utf8(stdout).expect("stdout is utf8");
     serde_json::from_str(text)
         .unwrap_or_else(|err| panic!("stdout is not valid JSON ({err}):\n{text}"))
@@ -439,4 +443,128 @@ fn unknown_top_level_key_is_rejected_by_the_schema_and_the_binary() {
         .status()
         .expect("spawn the binary");
     assert_eq!(status.code(), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2 built-binary fixture proofs (maximum config input coverage)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_json_stdout_32_row_max_config_input_coverage_stays_under_cap() {
+    let rows: Vec<String> = (0..32)
+        .map(|i| {
+            let id = format!("c{i:063}");
+            assert_eq!(id.len(), 64);
+            let name = format!("\"\\{}", "a".repeat(62));
+            assert_eq!(name.len(), 64);
+            let name_json = serde_json::to_string(&name).unwrap();
+            let group = format!("g{i:031}");
+            assert_eq!(group.len(), 32);
+            let group_json = serde_json::to_string(&group).unwrap();
+            let instance = format!("proj:reg{i}:{}", "i".repeat(256 - 9 - format!("{i}").len()));
+            assert_eq!(instance.len(), 256);
+            let extra_args: Vec<String> = (0..16).map(|_| "x".repeat(128)).collect();
+            let json_args = serde_json::to_string(&extra_args).unwrap();
+            // Non-IP address forces a per-connection config error row in status
+            // without requiring a systemd user bus session in CI.
+            let address = format!("invalid.local.host{}", "a".repeat(253 - 18));
+            assert_eq!(address.len(), 253);
+
+            format!(
+                r#"{{"id": "{id}", "name": {name_json}, "group": {group_json}, "instance": "{instance}", "address": "{address}", "port": {port}, "extra_args": {json_args}}}"#,
+                port = 20000 + i
+            )
+        })
+        .collect();
+
+    let json_content = format!(r#"{{"version": 1, "connections": [{}]}}"#, rows.join(","));
+    let config = ConfigFixture::write(&json_content);
+
+    let output = bin()
+        .args([
+            "--config",
+            config.path().to_str().unwrap(),
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("spawn binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "status --json 32-row config must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_bytes = &output.stdout;
+    assert!(
+        stdout_bytes.len() <= 262_144,
+        "stdout byte length {} exceeds 262144 bytes",
+        stdout_bytes.len()
+    );
+
+    let instance = parse_stdout_json(stdout_bytes);
+    assert_validates("schemas/status.v1.json", &instance);
+    assert_eq!(instance["total"], 32);
+    eprintln!(
+        "MEASURED: 32-row observed binary status JSON stdout size: {} bytes (cap: 262144)",
+        stdout_bytes.len()
+    );
+}
+
+#[test]
+fn doctor_json_stdout_max_config_input_coverage_stays_under_cap() {
+    let long_path_dir = "d".repeat(200);
+    let config = ConfigFixture::write(EMPTY_CONFIG);
+    let path_with_long_dir = config
+        .path()
+        .parent()
+        .unwrap()
+        .join(long_path_dir)
+        .join("conn.json");
+
+    let output = bin()
+        .args([
+            "--config",
+            path_with_long_dir.to_str().unwrap(),
+            "doctor",
+            "--json",
+        ])
+        .output()
+        .expect("spawn binary");
+
+    assert_eq!(output.status.code(), Some(3)); // config check fails for missing path -> exit 3
+
+    let stdout_bytes = &output.stdout;
+    assert!(
+        stdout_bytes.len() <= 65_536,
+        "stdout byte length {} exceeds 65536 bytes",
+        stdout_bytes.len()
+    );
+
+    let instance = parse_stdout_json(stdout_bytes);
+    assert_validates("schemas/doctor.v1.json", &instance);
+    assert_eq!(instance["ok"], false);
+    assert_eq!(instance["checks"].as_array().unwrap().len(), 6);
+    eprintln!(
+        "MEASURED: observed Doctor JSON stdout size: {} bytes (cap: 65536)",
+        stdout_bytes.len()
+    );
+}
+
+#[test]
+fn over_limit_config_field_rejects_with_exit_code_2() {
+    let over_limit_id = "a".repeat(65);
+    let json_content = format!(
+        r#"{{"version": 1, "connections": [{{"id": "{over_limit_id}", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+    );
+    let config = ConfigFixture::write(&json_content);
+
+    let output = bin()
+        .args(["--config", config.path().to_str().unwrap(), "status"])
+        .output()
+        .expect("spawn binary");
+
+    assert_eq!(output.status.code(), Some(2));
 }

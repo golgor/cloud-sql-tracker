@@ -146,13 +146,13 @@ fn invalid_address_row(connection: &Connection, unit: UnitName) -> StatusRow {
         unit: Some(unit),
         port_open: false,
         uptime_sec: None,
-        error: Some(model::StatusError {
-            code: ErrorCode::Config,
-            detail: format!(
+        error: Some(model::StatusError::new(
+            ErrorCode::Config,
+            format!(
                 "connection `{}` has an invalid address `{}`",
                 connection.id, connection.address
             ),
-        }),
+        )),
     }
 }
 
@@ -748,9 +748,8 @@ mod tests {
             unit: None,
             port_open: state == HealthState::Running,
             uptime_sec: None,
-            error: (state == HealthState::Error).then(|| crate::model::StatusError {
-                code: ErrorCode::PortInUse,
-                detail: "port held by someone else".to_string(),
+            error: (state == HealthState::Error).then(|| {
+                crate::model::StatusError::new(ErrorCode::PortInUse, "port held by someone else")
             }),
         }
     }

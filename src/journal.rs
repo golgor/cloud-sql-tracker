@@ -95,22 +95,21 @@ pub(crate) fn journal_user_check() -> CheckRow {
 
 fn check_row_for_journal_user(result: Result<Output, JournalError>) -> CheckRow {
     match result {
-        Ok(_) => CheckRow {
-            id: "journal_user".to_string(),
-            status: CheckStatus::Pass,
-            detail: "user journal is accessible".to_string(),
-            hint: None,
-        },
-        Err(err) => CheckRow {
-            id: "journal_user".to_string(),
-            status: CheckStatus::Fail,
-            detail: err.to_string(),
-            hint: Some(
+        Ok(_) => CheckRow::new(
+            "journal_user",
+            CheckStatus::Pass,
+            "user journal is accessible",
+            None,
+        ),
+        Err(err) => CheckRow::new(
+            "journal_user",
+            CheckStatus::Fail,
+            err.to_string(),
+            Some(
                 "Check that a systemd --user session is active (e.g. \
-                 `loginctl enable-linger $USER`) and that journald is running."
-                    .to_string(),
+                 `loginctl enable-linger $USER`) and that journald is running.",
             ),
-        },
+        ),
     }
 }
 

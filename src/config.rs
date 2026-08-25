@@ -18,6 +18,13 @@ const DEFAULT_ADDRESS: &str = "127.0.0.1";
 const RESERVED_PORTS: [u16; 3] = [1433, 3306, 5432];
 const MIN_UNPRIVILEGED_PORT: u16 = 1024;
 const MAX_ID_LEN: usize = 64;
+const MAX_NAME_LEN: usize = 64;
+const MAX_GROUP_LEN: usize = 32;
+const MAX_INSTANCE_LEN: usize = 256;
+const MAX_ADDRESS_LEN: usize = 253;
+const MAX_PROXY_BIN_LEN: usize = 4095;
+const MAX_EXTRA_ARGS_COUNT: usize = 16;
+const MAX_EXTRA_ARGS_TOTAL_LEN: usize = 2048;
 /// Hard cap on Connection count (`docs/config.v1.md`, "Top-level object",
 /// the `connections` row). Counts every row, including `enabled: false`.
 const MAX_CONNECTIONS: usize = 32;
@@ -44,6 +51,8 @@ pub(crate) enum ConfigError {
     UnsupportedVersion { found: i64 },
     #[error("proxy_bin must not be empty")]
     EmptyProxyBin,
+    #[error("invalid proxy_bin: {0}")]
+    InvalidProxyBin(String),
     #[error("connection `{id}`: {reason}")]
     InvalidConnection { id: String, reason: String },
     #[error("duplicate connection id `{0}`")]
@@ -98,7 +107,20 @@ fn validate_proxy_bin(proxy_bin: Option<String>) -> Result<String, ConfigError> 
     match proxy_bin {
         None => Ok(DEFAULT_PROXY_BIN.to_string()),
         Some(bin) if bin.is_empty() => Err(ConfigError::EmptyProxyBin),
-        Some(bin) => Ok(bin),
+        Some(bin) => {
+            if !is_printable_ascii(&bin) {
+                return Err(ConfigError::InvalidProxyBin(
+                    "must contain only printable ASCII characters".to_string(),
+                ));
+            }
+            if bin.len() > MAX_PROXY_BIN_LEN {
+                return Err(ConfigError::InvalidProxyBin(format!(
+                    "exceeds limit of {MAX_PROXY_BIN_LEN} bytes (got {})",
+                    bin.len()
+                )));
+            }
+            Ok(bin)
+        }
     }
 }
 
@@ -192,6 +214,12 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connec
         .unwrap_or_else(|| DEFAULT_ADDRESS.to_string());
     validate_address(&address).map_err(|reason| invalid(&id, reason))?;
 
+    let extra_args = raw
+        .extra_args
+        .or_else(|| defaults.extra_args.clone())
+        .unwrap_or_default();
+    validate_extra_args(&extra_args).map_err(|reason| invalid(&id, reason))?;
+
     Ok(Connection {
         id,
         name: raw.name,
@@ -204,10 +232,7 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connec
             .auto_iam_authn
             .or(defaults.auto_iam_authn)
             .unwrap_or(false),
-        extra_args: raw
-            .extra_args
-            .or_else(|| defaults.extra_args.clone())
-            .unwrap_or_default(),
+        extra_args,
         enabled: raw.enabled.or(defaults.enabled).unwrap_or(true),
     })
 }
@@ -217,6 +242,25 @@ fn invalid(id: &str, reason: impl Into<String>) -> ConfigError {
         id: id.to_string(),
         reason: reason.into(),
     }
+}
+
+fn is_printable_ascii(s: &str) -> bool {
+    s.bytes().all(|b| (0x20..=0x7E).contains(&b))
+}
+
+fn bounded_ascii(field: &str, value: &str, max: usize) -> Result<(), String> {
+    if !is_printable_ascii(value) {
+        return Err(format!(
+            "{field} must contain only printable ASCII characters"
+        ));
+    }
+    if value.len() > max {
+        return Err(format!(
+            "{field} exceeds limit of {max} bytes (got {})",
+            value.len()
+        ));
+    }
+    Ok(())
 }
 
 /// Shared non-empty check for `name`, `group`, and `address`
@@ -229,29 +273,30 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Non-empty (`docs/config.v1.md`, "Connection fields"). Free text
-/// otherwise; no charset rule beyond that.
+/// Non-empty, printable ASCII, length 1-64 (`docs/config.v1.md`,
+/// "Connection fields").
 fn validate_name(name: &str) -> Result<(), String> {
-    require_non_empty("name", name)
+    require_non_empty("name", name)?;
+    bounded_ascii("name", name, MAX_NAME_LEN)
 }
 
-/// Non-empty and must not start with `-` (`docs/config.v1.md`,
-/// "Connection fields"). Free text otherwise, e.g. `Prod EU (read only)`.
+/// Non-empty, printable ASCII, length 1-32, and must not start with `-`
+/// (`docs/config.v1.md`, "Connection fields").
 /// A leading `-` is rejected because clap reads it as an option, not a
 /// value, so `--group -legacy` could never reach this Connection.
 fn validate_group(group: &str) -> Result<(), String> {
     require_non_empty("group", group)?;
     if group.starts_with('-') {
-        Err(format!("group `{group}` must not start with '-'"))
-    } else {
-        Ok(())
+        return Err(format!("group `{group}` must not start with '-'"));
     }
+    bounded_ascii("group", group, MAX_GROUP_LEN)
 }
 
-/// Non-empty after the defaults merge (`docs/config.v1.md`, "Connection
-/// fields"). Free text otherwise.
+/// Non-empty, printable ASCII, length 1-253 after the defaults merge
+/// (`docs/config.v1.md`, "Connection fields").
 fn validate_address(address: &str) -> Result<(), String> {
-    require_non_empty("address", address)
+    require_non_empty("address", address)?;
+    bounded_ascii("address", address, MAX_ADDRESS_LEN)
 }
 
 /// `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, length 1-64 (`docs/config.v1.md`,
@@ -269,21 +314,47 @@ fn validate_id(id: &str) -> Result<(), String> {
     }
 }
 
-/// `project:region:instance` — three non-empty, whitespace-free segments
-/// (`docs/config.v1.md`, "Connection fields").
+/// `project:region:instance` — three non-empty, whitespace-free segments,
+/// printable ASCII, length 1-256 (`docs/config.v1.md`, "Connection fields").
 fn validate_instance(instance: &str) -> Result<(), String> {
+    bounded_ascii("instance", instance, MAX_INSTANCE_LEN)?;
     let segments: Vec<&str> = instance.split(':').collect();
     let shape_ok = segments.len() == 3
         && segments
             .iter()
             .all(|segment| !segment.is_empty() && !segment.chars().any(char::is_whitespace));
-    if shape_ok {
-        Ok(())
-    } else {
-        Err(format!(
+    if !shape_ok {
+        return Err(format!(
             "instance `{instance}` must be project:region:instance (three non-empty segments)"
-        ))
+        ));
     }
+    Ok(())
+}
+
+/// At most 16 elements, printable ASCII per element, total length <= 2048 bytes
+/// (`docs/config.v1.md`, "Connection fields").
+fn validate_extra_args(extra_args: &[String]) -> Result<(), String> {
+    if extra_args.len() > MAX_EXTRA_ARGS_COUNT {
+        return Err(format!(
+            "extra_args holds {} elements, maximum is {MAX_EXTRA_ARGS_COUNT}",
+            extra_args.len()
+        ));
+    }
+    let mut total_len = 0;
+    for arg in extra_args {
+        if !is_printable_ascii(arg) {
+            return Err(
+                "extra_args element must contain only printable ASCII characters".to_string(),
+            );
+        }
+        total_len += arg.len();
+    }
+    if total_len > MAX_EXTRA_ARGS_TOTAL_LEN {
+        return Err(format!(
+            "extra_args total length is {total_len} bytes, maximum is {MAX_EXTRA_ARGS_TOTAL_LEN}"
+        ));
+    }
+    Ok(())
 }
 
 /// 1024-65535, excluding the reserved set (`docs/config.v1.md`,
@@ -493,41 +564,226 @@ mod tests {
         assert_eq!(config.connections[0].group, "Prod EU (read only)");
     }
 
-    /// `starts_with('-')` checks the leading `char`, not the leading byte.
-    /// A multi-byte first character (`ü`) must load, and a look-alike dash
-    /// that is not ASCII `-` (U+2013 en dash) must also load. Locks the
-    /// char-vs-byte behavior so a future `as_bytes()[0]` "optimization"
-    /// fails loudly.
     #[test]
-    fn parse_accepts_a_group_with_a_multi_byte_first_character() {
+    fn parse_rejects_non_ascii_in_group() {
         let json = r#"{
             "version": 1,
             "connections": [
-                {"id": "a", "name": "A", "group": "über", "instance": "p:r:i1", "port": 15432},
-                {"id": "b", "name": "B", "group": "–legacy", "instance": "p:r:i2", "port": 15433}
+                {"id": "a", "name": "A", "group": "über", "instance": "p:r:i1", "port": 15432}
             ]
         }"#;
-        let config = parse(json.as_bytes()).expect("multi-byte first character must load");
-        assert_eq!(config.connections[0].group, "über");
-        assert_eq!(config.connections[1].group, "–legacy");
+        let err = parse(json.as_bytes()).expect_err("non-ASCII group must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: group must contain only printable ASCII characters"
+        );
     }
 
-    /// `schemas/config.v1.json` `group` pattern is `^[^-]` (anchored at the
-    /// start, no `$`/`.*` reach across lines). `^[^-].*$` without the `m`
-    /// flag rejected a value containing `\n` even though Rust's
-    /// `validate_group` accepts any non-empty, non-dash-led string. Locks
-    /// that a newline in `group` parses in Rust; see the acceptance report
-    /// for the matching `check-jsonschema` run against the schema file.
     #[test]
-    fn parse_accepts_a_group_containing_a_newline() {
+    fn parse_rejects_control_characters_in_group() {
         let json = r#"{
             "version": 1,
             "connections": [
                 {"id": "a", "name": "A", "group": "line1\nline2", "instance": "p:r:i", "port": 15432}
             ]
         }"#;
-        let config = parse(json.as_bytes()).expect("a group containing a newline must load");
-        assert_eq!(config.connections[0].group, "line1\nline2");
+        let err = parse(json.as_bytes()).expect_err("newline in group must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: group must contain only printable ASCII characters"
+        );
+    }
+
+    #[test]
+    fn test_byte_length_vs_char_count_helper() {
+        // e-acute 'é' is 1 character but 2 UTF-8 bytes.
+        let e_acute = "é";
+        assert_eq!(e_acute.chars().count(), 1);
+        assert_eq!(e_acute.len(), 2);
+
+        let sixty_four_chars_65_bytes = format!("{}{}", "a".repeat(63), e_acute);
+        assert_eq!(sixty_four_chars_65_bytes.chars().count(), 64);
+        assert_eq!(sixty_four_chars_65_bytes.len(), 65);
+
+        // Prove our byte length check sees 65 bytes:
+        assert!(sixty_four_chars_65_bytes.len() > MAX_NAME_LEN);
+
+        // Config rejects non-ASCII under ASCII policy:
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "{sixty_four_chars_65_bytes}", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("non-ASCII name must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: name must contain only printable ASCII characters"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_id_length() {
+        let valid_id = "a".repeat(64);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "{valid_id}", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("64-byte id is valid");
+        assert_eq!(config.connections[0].id, valid_id);
+
+        let invalid_id = "a".repeat(65);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "{invalid_id}", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("65-byte id must reject");
+        assert!(err.to_string().contains("at most 64 bytes"));
+    }
+
+    #[test]
+    fn parse_bounds_name_length() {
+        let valid_name = "a".repeat(64);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "{valid_name}", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("64-byte name is valid");
+        assert_eq!(config.connections[0].name, valid_name);
+
+        let invalid_name = "a".repeat(65);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "{invalid_name}", "group": "g", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("65-byte name must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: name exceeds limit of 64 bytes (got 65)"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_group_length() {
+        let valid_group = "g".repeat(32);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "{valid_group}", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("32-byte group is valid");
+        assert_eq!(config.connections[0].group, valid_group);
+
+        let invalid_group = "g".repeat(33);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "{invalid_group}", "instance": "p:r:i", "port": 15432}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("33-byte group must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: group exceeds limit of 32 bytes (got 33)"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_instance_length() {
+        // "p:" (2) + "r:" (2) + "i..." (252) = 256 bytes
+        let valid_inst = format!("p:r:{}", "i".repeat(252));
+        assert_eq!(valid_inst.len(), 256);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "{valid_inst}", "port": 15432}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("256-byte instance is valid");
+        assert_eq!(config.connections[0].instance, valid_inst);
+
+        let invalid_inst = format!("p:r:{}", "i".repeat(253));
+        assert_eq!(invalid_inst.len(), 257);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "{invalid_inst}", "port": 15432}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("257-byte instance must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: instance exceeds limit of 256 bytes (got 257)"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_address_length() {
+        let valid_addr = "1".repeat(253);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "{valid_addr}"}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("253-byte address is valid");
+        assert_eq!(config.connections[0].address, valid_addr);
+
+        let invalid_addr = "1".repeat(254);
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "{invalid_addr}"}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("254-byte address must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: address exceeds limit of 253 bytes (got 254)"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_proxy_bin_length() {
+        let valid_bin = format!("/tmp/{}", "a".repeat(4090));
+        assert_eq!(valid_bin.len(), 4095);
+        let json = format!(r#"{{"version": 1, "proxy_bin": "{valid_bin}", "connections": []}}"#);
+        let config = parse(json.as_bytes()).expect("4095-byte proxy_bin is valid");
+        assert_eq!(config.proxy_bin, valid_bin);
+
+        let invalid_bin = format!("/tmp/{}", "a".repeat(4091));
+        assert_eq!(invalid_bin.len(), 4096);
+        let json = format!(r#"{{"version": 1, "proxy_bin": "{invalid_bin}", "connections": []}}"#);
+        let err = parse(json.as_bytes()).expect_err("4096-byte proxy_bin must reject");
+        assert_eq!(
+            err.to_string(),
+            "invalid proxy_bin: exceeds limit of 4095 bytes (got 4096)"
+        );
+    }
+
+    #[test]
+    fn parse_bounds_extra_args_count_and_total_bytes() {
+        // 16 elements of 100 bytes = 1600 bytes (under both limits)
+        let sixteen_args: Vec<String> = (0..16)
+            .map(|i| format!("--arg-{i}={}", "x".repeat(90)))
+            .collect();
+        let json_args = serde_json::to_string(&sixteen_args).unwrap();
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": {json_args}}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("16 extra_args elements is valid");
+        assert_eq!(config.connections[0].extra_args.len(), 16);
+
+        // 17 elements
+        let seventeen_args: Vec<String> = (0..17).map(|i| format!("--arg-{i}")).collect();
+        let json_args = serde_json::to_string(&seventeen_args).unwrap();
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": {json_args}}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("17 extra_args elements must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: extra_args holds 17 elements, maximum is 16"
+        );
+
+        // 16 elements totaling 2048 bytes
+        // 2048 / 16 = 128 bytes per element
+        let exact_args: Vec<String> = (0..16).map(|_| "x".repeat(128)).collect();
+        let json_args = serde_json::to_string(&exact_args).unwrap();
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": {json_args}}}]}}"#
+        );
+        let config = parse(json.as_bytes()).expect("2048 total bytes extra_args is valid");
+        assert_eq!(config.connections[0].extra_args.len(), 16);
+
+        // 16 elements totaling 2049 bytes
+        let mut over_args = exact_args;
+        over_args[0].push('x');
+        let json_args = serde_json::to_string(&over_args).unwrap();
+        let json = format!(
+            r#"{{"version": 1, "connections": [{{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": {json_args}}}]}}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("2049 total bytes extra_args must reject");
+        assert_eq!(
+            err.to_string(),
+            "connection `a`: extra_args total length is 2049 bytes, maximum is 2048"
+        );
     }
 
     #[test]
