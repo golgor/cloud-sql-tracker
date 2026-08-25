@@ -227,7 +227,7 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Connection {
     }
 }
 
-/// Validate file-level defaults at their source (`docs/config.v1.md`, "Merge order").
+/// Validate file-level defaults at their source (`docs/config.v1.md`, "Decision: stricter validation and source checks keep schema version 1").
 fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
     if let Some(address) = &defaults.address {
         validate_address(address).map_err(ConfigError::InvalidDefaults)?;
@@ -238,7 +238,7 @@ fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Validate connection fields at their source (`docs/config.v1.md`, "Merge order").
+/// Validate connection fields at their source (`docs/config.v1.md`, "Decision: stricter validation and source checks keep schema version 1").
 fn validate_raw_connection(raw: &RawConnection) -> Result<(), ConfigError> {
     let id = &raw.id;
     validate_id(id).map_err(|reason| invalid(id, reason))?;

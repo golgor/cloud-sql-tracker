@@ -445,7 +445,7 @@ fn unknown_top_level_key_is_rejected_by_the_schema_and_the_binary() {
     assert_eq!(status.code(), Some(2));
 }
 
-/// Identity fields (`name`, `group`, `instance`, `port`) in `defaults`
+/// Identity fields (`id`, `name`, `group`, `instance`, `port`) in `defaults`
 /// are rejected **both** by the schema (`additionalProperties: false` on
 /// `defaultsObject`) **and** by the binary's parser — exit `2`.
 #[test]
@@ -453,6 +453,7 @@ fn identity_fields_in_defaults_are_rejected_by_the_schema_and_the_binary() {
     let schema = read_schema("schemas/config.v1.json");
     let validator = jsonschema::validator_for(&schema).expect("compile the config schema");
     let fields = [
+        ("id", r#""a""#),
         ("name", r#""Shared Name""#),
         ("group", r#""shared""#),
         ("instance", r#""p:r:i""#),
