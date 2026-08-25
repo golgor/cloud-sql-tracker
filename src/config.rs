@@ -91,9 +91,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Config, ConfigError> {
     validate_defaults(&defaults)?;
 
     let mut connections = Vec::with_capacity(raw.connections.len());
-    for raw_conn in raw.connections {
-        validate_raw_connection(&raw_conn)?;
-        connections.push(merge_connection(&defaults, raw_conn));
+    for connection in raw.connections {
+        validate_raw_connection(&connection)?;
+        connections.push(merge_connection(&defaults, connection));
     }
 
     check_connection_count(&connections)?;
@@ -227,6 +227,7 @@ fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Connection {
     }
 }
 
+/// Validate file-level defaults at their source (`docs/config.v1.md`, "Merge order").
 fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
     if let Some(address) = &defaults.address {
         validate_address(address).map_err(ConfigError::InvalidDefaults)?;
@@ -237,6 +238,7 @@ fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Validate connection fields at their source (`docs/config.v1.md`, "Merge order").
 fn validate_raw_connection(raw: &RawConnection) -> Result<(), ConfigError> {
     let id = &raw.id;
     validate_id(id).map_err(|reason| invalid(id, reason))?;
@@ -308,8 +310,8 @@ fn validate_group(group: &str) -> Result<(), String> {
     bounded_ascii("group", group, MAX_GROUP_LEN)
 }
 
-/// Non-empty, printable ASCII, length 1-253 after the defaults merge
-/// (`docs/config.v1.md`, "Connection fields").
+/// Non-empty, printable ASCII, length 1-253 (`docs/config.v1.md`,
+/// "Connection fields").
 fn validate_address(address: &str) -> Result<(), String> {
     require_non_empty("address", address)?;
     bounded_ascii("address", address, MAX_ADDRESS_LEN)
@@ -1078,6 +1080,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_empty_defaults_address_even_when_overridden() {
+        let json = r#"{
+            "version": 1,
+            "defaults": {"address": ""},
+            "connections": [
+                {"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "127.0.0.1"}
+            ]
+        }"#;
+
+        let err = parse(json.as_bytes()).expect_err("empty defaults.address must reject");
+        assert_eq!(err.to_string(), "defaults: address must not be empty");
+    }
+
+    #[test]
     fn parse_rejects_non_ascii_defaults_address_even_when_overridden() {
         let json = r#"{
             "version": 1,
@@ -1181,11 +1197,6 @@ mod tests {
         assert_eq!(
             config.connections[0].extra_args, ten_conn_args,
             "Connection extra_args must replace defaults extra_args, not append"
-        );
-        assert_eq!(
-            config.connections[0].extra_args.len(),
-            10,
-            "Merged extra_args count must be 10, proving pick-one replacement"
         );
     }
 }

@@ -45,7 +45,7 @@ Independent from Status document `version` and from binary `cli_version`.
 
 - **Bump config `version`** when required fields change meaning, known keys are removed/renamed, or validation becomes incompatible.
 - Adding a **new optional known key** in a later config schema version is a deliberate schema bump (v1 is **closed** to unknown keys — see below).
-- Validation tightenings stay on `version: 1` without a bump. See [Decision: stricter field validation keeps schema version 1](#decision-stricter-field-validation-keeps-schema-version-1) under Connection fields.
+- Validation tightenings and key removals from `defaults` during pre-1.0 development stay on `version: 1` without a bump. See [Decision: stricter validation and source checks keep schema version 1](#decision-stricter-validation-and-source-checks-keep-schema-version-1) under Connection fields.
 
 ---
 
@@ -90,7 +90,7 @@ For each element of `connections`:
 1. Start with **built-in defaults** (table above).  
 2. Overlay file-level **`defaults`** (object; only known keys allowed).  
 3. Overlay the **connection object** (connection wins on conflict).  
-4. Construct the final connection. The merge is a strict pick-one choice per field, so the merged connection is valid by construction.
+4. Construct the final connection. The merge is a strict pick-one choice per field, so every field value is valid by construction (document-level uniqueness of `id`, `port`, and `instance` is checked across all connections after merge).
 
 File `defaults` holds optional fields only (`address`, `private_ip`, `auto_iam_authn`, `extra_args`, `enabled`). Identity fields (`id`, `name`, `group`, `instance`, `port`) belong on each Connection object.
 
@@ -130,7 +130,12 @@ Validation tightenings make these inputs newly invalid:
 
 **Why:** each value is checked once at its file location. An error names the block that is wrong. Required identity fields cannot be set in `defaults`.
 
-**Discarded:** post-merge validation (validates values twice, and hides invalid defaults when overridden). Widening `RawDefaults` for identity fields (identity fields must be set per connection). Bumping config schema to `version: 2` (not necessary during pre-1.0 development).
+**Discarded:**
+
+- Post-merge-only validation: hides an invalid default whenever a Connection overrides it.
+- Source validation plus merged validation: validates values twice.
+- Widening `RawDefaults` for identity fields: identity fields must be set per connection.
+- Bumping config schema to `version: 2`: not necessary during pre-1.0 development.
 
 **Unchanged:** the defaults merge order and field precedence do not change.
 
@@ -217,9 +222,9 @@ Prefer reporting **all** validation errors in one message when inexpensive; othe
 
 ## Consumer checklist (implementers / agents)
 
-1. Parse JSON; reject on syntax error.  
-2. Reject unknown keys (`additionalProperties: false`).  
-3. Merge built-ins → `defaults` → connection.  
-4. Enforce required fields, id charset, instance shape, port range + reserved set.  
-5. Enforce unique `id`, `port`, `instance`.  
+1. Parse JSON; reject on syntax error.
+2. Reject unknown keys (`additionalProperties: false`).
+3. Enforce field validation rules at each source (`defaults` block and connection object).
+4. Merge built-ins → `defaults` → connection.
+5. Enforce unique `id`, `port`, `instance`.
 6. Keep prose, JSON Schema, and golden example in sync in the same PR when the contract changes.
