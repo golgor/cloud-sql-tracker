@@ -445,6 +445,44 @@ fn unknown_top_level_key_is_rejected_by_the_schema_and_the_binary() {
     assert_eq!(status.code(), Some(2));
 }
 
+/// Identity fields (`id`, `name`, `group`, `instance`, `port`) in `defaults`
+/// are rejected **both** by the schema (`additionalProperties: false` on
+/// `defaultsObject`) **and** by the binary's parser — exit `2`.
+#[test]
+fn identity_fields_in_defaults_are_rejected_by_the_schema_and_the_binary() {
+    let schema = read_schema("schemas/config.v1.json");
+    let validator = jsonschema::validator_for(&schema).expect("compile the config schema");
+    let fields = [
+        ("id", r#""a""#),
+        ("name", r#""Shared Name""#),
+        ("group", r#""shared""#),
+        ("instance", r#""p:r:i""#),
+        ("port", "15432"),
+    ];
+
+    for (field, val) in fields {
+        let json =
+            format!(r#"{{"version": 1, "defaults": {{"{field}": {val}}}, "connections": []}}"#);
+        let instance: serde_json::Value =
+            serde_json::from_str(&json).expect("fixture is valid JSON");
+        assert!(
+            validator.iter_errors(&instance).next().is_some(),
+            "schemas/config.v1.json must reject defaults.{field}"
+        );
+
+        let config = ConfigFixture::write(&json);
+        let status = bin()
+            .args(["--config", config.path().to_str().unwrap(), "status"])
+            .status()
+            .expect("spawn the binary");
+        assert_eq!(
+            status.code(),
+            Some(2),
+            "binary must exit 2 when defaults.{field} is set"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2 built-binary fixture proofs (maximum config input coverage)
 // ---------------------------------------------------------------------------

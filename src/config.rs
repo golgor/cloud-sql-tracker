@@ -53,6 +53,8 @@ pub(crate) enum ConfigError {
     EmptyProxyBin,
     #[error("invalid proxy_bin: {0}")]
     InvalidProxyBin(String),
+    #[error("defaults: {0}")]
+    InvalidDefaults(String),
     #[error("connection `{id}`: {reason}")]
     InvalidConnection { id: String, reason: String },
     #[error("duplicate connection id `{0}`")]
@@ -86,11 +88,14 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Config, ConfigError> {
     }
 
     let defaults = raw.defaults.unwrap_or_default();
-    let connections = raw
-        .connections
-        .into_iter()
-        .map(|connection| merge_connection(&defaults, connection))
-        .collect::<Result<Vec<_>, _>>()?;
+    validate_defaults(&defaults)?;
+
+    let mut connections = Vec::with_capacity(raw.connections.len());
+    for connection in raw.connections {
+        validate_raw_connection(&connection)?;
+        connections.push(merge_connection(&defaults, connection));
+    }
+
     check_connection_count(&connections)?;
     check_uniqueness(&connections)?;
 
@@ -196,45 +201,58 @@ struct RawConnection {
 
 /// Built-in defaults (`docs/config.v1.md`, "Built-in defaults") layered
 /// under file `defaults`, then the connection object (`docs/config.v1.md`,
-/// "Merge order"). Identity fields (`name`/`group`/`instance`/`port`) are
-/// already required directly on `raw`; only the optional fields merge.
-fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Result<Connection, ConfigError> {
-    let id = raw.id;
-    validate_id(&id).map_err(|reason| invalid(&id, reason))?;
-    validate_name(&raw.name).map_err(|reason| invalid(&id, reason))?;
-    validate_group(&raw.group).map_err(|reason| invalid(&id, reason))?;
-    validate_instance(&raw.instance).map_err(|reason| invalid(&id, reason))?;
-    validate_port(raw.port).map_err(|reason| invalid(&id, reason))?;
-
-    // address is merged from defaults, so it can only be validated once the
-    // final value is known.
-    let address = raw
-        .address
-        .or_else(|| defaults.address.clone())
-        .unwrap_or_else(|| DEFAULT_ADDRESS.to_string());
-    validate_address(&address).map_err(|reason| invalid(&id, reason))?;
-
-    let extra_args = raw
-        .extra_args
-        .or_else(|| defaults.extra_args.clone())
-        .unwrap_or_default();
-    validate_extra_args(&extra_args).map_err(|reason| invalid(&id, reason))?;
-
-    Ok(Connection {
-        id,
+/// "Merge order"). Every candidate value is validated at its source before
+/// merging; the merge is a strict pick-one choice per field.
+fn merge_connection(defaults: &RawDefaults, raw: RawConnection) -> Connection {
+    Connection {
+        id: raw.id,
         name: raw.name,
         group: raw.group,
         instance: raw.instance,
-        address,
+        address: raw
+            .address
+            .or_else(|| defaults.address.clone())
+            .unwrap_or_else(|| DEFAULT_ADDRESS.to_string()),
         port: raw.port,
         private_ip: raw.private_ip.or(defaults.private_ip).unwrap_or(false),
         auto_iam_authn: raw
             .auto_iam_authn
             .or(defaults.auto_iam_authn)
             .unwrap_or(false),
-        extra_args,
+        extra_args: raw
+            .extra_args
+            .or_else(|| defaults.extra_args.clone())
+            .unwrap_or_default(),
         enabled: raw.enabled.or(defaults.enabled).unwrap_or(true),
-    })
+    }
+}
+
+/// Validate file-level defaults at their source (`docs/config.v1.md`, "Decision: stricter validation and source checks keep schema version 1").
+fn validate_defaults(defaults: &RawDefaults) -> Result<(), ConfigError> {
+    if let Some(address) = &defaults.address {
+        validate_address(address).map_err(ConfigError::InvalidDefaults)?;
+    }
+    if let Some(extra_args) = &defaults.extra_args {
+        validate_extra_args(extra_args).map_err(ConfigError::InvalidDefaults)?;
+    }
+    Ok(())
+}
+
+/// Validate connection fields at their source (`docs/config.v1.md`, "Decision: stricter validation and source checks keep schema version 1").
+fn validate_raw_connection(raw: &RawConnection) -> Result<(), ConfigError> {
+    let id = &raw.id;
+    validate_id(id).map_err(|reason| invalid(id, reason))?;
+    validate_name(&raw.name).map_err(|reason| invalid(id, reason))?;
+    validate_group(&raw.group).map_err(|reason| invalid(id, reason))?;
+    validate_instance(&raw.instance).map_err(|reason| invalid(id, reason))?;
+    validate_port(raw.port).map_err(|reason| invalid(id, reason))?;
+    if let Some(address) = &raw.address {
+        validate_address(address).map_err(|reason| invalid(id, reason))?;
+    }
+    if let Some(extra_args) = &raw.extra_args {
+        validate_extra_args(extra_args).map_err(|reason| invalid(id, reason))?;
+    }
+    Ok(())
 }
 
 fn invalid(id: &str, reason: impl Into<String>) -> ConfigError {
@@ -292,8 +310,8 @@ fn validate_group(group: &str) -> Result<(), String> {
     bounded_ascii("group", group, MAX_GROUP_LEN)
 }
 
-/// Non-empty, printable ASCII, length 1-253 after the defaults merge
-/// (`docs/config.v1.md`, "Connection fields").
+/// Non-empty, printable ASCII, length 1-253 (`docs/config.v1.md`,
+/// "Connection fields").
 fn validate_address(address: &str) -> Result<(), String> {
     require_non_empty("address", address)?;
     bounded_ascii("address", address, MAX_ADDRESS_LEN)
@@ -1029,5 +1047,156 @@ mod tests {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
+    }
+
+    #[test]
+    fn parse_rejects_identity_fields_in_defaults() {
+        for field in ["name", "group", "instance", "port"] {
+            let val = if field == "port" { "15432" } else { "\"test\"" };
+            let json =
+                format!(r#"{{"version": 1, "defaults": {{"{field}": {val}}}, "connections": []}}"#);
+            let err = parse(json.as_bytes()).expect_err(&format!("defaults.{field} must reject"));
+            assert!(matches!(err, ConfigError::Json(_)), "field {field}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_defaults_address_over_limit_even_when_overridden() {
+        let invalid_addr = "1".repeat(254);
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "defaults": {{"address": "{invalid_addr}"}},
+                "connections": [
+                    {{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "127.0.0.1"}}
+                ]
+            }}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("over-limit defaults.address must reject");
+        assert_eq!(
+            err.to_string(),
+            "defaults: address exceeds limit of 253 bytes (got 254)"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_defaults_address_even_when_overridden() {
+        let json = r#"{
+            "version": 1,
+            "defaults": {"address": ""},
+            "connections": [
+                {"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "127.0.0.1"}
+            ]
+        }"#;
+
+        let err = parse(json.as_bytes()).expect_err("empty defaults.address must reject");
+        assert_eq!(err.to_string(), "defaults: address must not be empty");
+    }
+
+    #[test]
+    fn parse_rejects_non_ascii_defaults_address_even_when_overridden() {
+        let json = r#"{
+            "version": 1,
+            "defaults": {"address": "127.0.0.é"},
+            "connections": [
+                {"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "address": "127.0.0.1"}
+            ]
+        }"#;
+        let err = parse(json.as_bytes()).expect_err("non-ASCII defaults.address must reject");
+        assert_eq!(
+            err.to_string(),
+            "defaults: address must contain only printable ASCII characters"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_defaults_address_of_253_bytes() {
+        let valid_addr = "1".repeat(253);
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "defaults": {{"address": "{valid_addr}"}},
+                "connections": [
+                    {{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432}}
+                ]
+            }}"#
+        );
+        let config = parse(json.as_bytes()).expect("253-byte defaults.address is valid");
+        assert_eq!(config.connections[0].address, valid_addr);
+    }
+
+    #[test]
+    fn parse_rejects_defaults_extra_args_count_over_limit_even_when_overridden() {
+        let seventeen_args: Vec<String> = (0..17).map(|i| format!("--arg-{i}")).collect();
+        let json_args = serde_json::to_string(&seventeen_args).unwrap();
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "defaults": {{"extra_args": {json_args}}},
+                "connections": [
+                    {{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": ["--override"]}}
+                ]
+            }}"#
+        );
+        let err = parse(json.as_bytes()).expect_err("17 defaults extra_args elements must reject");
+        assert_eq!(
+            err.to_string(),
+            "defaults: extra_args holds 17 elements, maximum is 16"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_defaults_extra_args_total_bytes_over_limit_even_when_overridden() {
+        let exact_args: Vec<String> = (0..16).map(|_| "x".repeat(128)).collect();
+        let mut over_args = exact_args;
+        over_args[0].push('x');
+        let json_args = serde_json::to_string(&over_args).unwrap();
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "defaults": {{"extra_args": {json_args}}},
+                "connections": [
+                    {{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": []}}
+                ]
+            }}"#
+        );
+        let err =
+            parse(json.as_bytes()).expect_err("2049 total bytes defaults extra_args must reject");
+        assert_eq!(
+            err.to_string(),
+            "defaults: extra_args total length is 2049 bytes, maximum is 2048"
+        );
+    }
+
+    /// Pins the critical invariant: `merge_connection` is a strict pick-one replacement,
+    /// NOT an append or concatenation.
+    ///
+    /// If `extra_args` ever concatenated defaults and connection lists, two individually
+    /// valid lists of 10 elements each would merge to 20 elements, bypassing source-only
+    /// validation and breaching the 16-element cap (`MAX_EXTRA_ARGS_COUNT`).
+    #[test]
+    fn merge_is_pick_one_so_source_validation_is_sufficient() {
+        let ten_default_args: Vec<String> = (0..10).map(|i| format!("--def-{i}")).collect();
+        let ten_conn_args: Vec<String> = (0..10).map(|i| format!("--conn-{i}")).collect();
+
+        let def_json = serde_json::to_string(&ten_default_args).unwrap();
+        let conn_json = serde_json::to_string(&ten_conn_args).unwrap();
+
+        let json = format!(
+            r#"{{
+                "version": 1,
+                "defaults": {{"extra_args": {def_json}}},
+                "connections": [
+                    {{"id": "a", "name": "A", "group": "g", "instance": "p:r:i", "port": 15432, "extra_args": {conn_json}}}
+                ]
+            }}"#
+        );
+
+        let config = parse(json.as_bytes())
+            .expect("10 default args and 10 conn args are each valid at source");
+        assert_eq!(
+            config.connections[0].extra_args, ten_conn_args,
+            "Connection extra_args must replace defaults extra_args, not append"
+        );
     }
 }
