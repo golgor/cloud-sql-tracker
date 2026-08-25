@@ -159,6 +159,57 @@ fn unique<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
     Some(first)
 }
 
+/// Finds a closed TCP port on `127.0.0.1` outside the kernel's ephemeral port range.
+///
+/// Reads `/proc/sys/net/ipv4/ip_local_port_range` at test time to find a free port
+/// at or above 1024 that is outside the ephemeral range.
+/// Because the kernel auto-assigns ephemeral ports (`bind(0)`) only from within
+/// that range, ports chosen outside it will not be auto-allocated to other processes
+/// while the test runs.
+///
+/// # Limitation
+/// This is a mitigation against ephemeral port allocation churn under test load,
+/// not an absolute proof. A process that explicitly binds to this exact port number
+/// between releasing the listener and probing it can still cause a test failure.
+#[cfg(test)]
+pub(crate) fn closed_non_ephemeral_port() -> u16 {
+    use std::net::{Ipv4Addr, TcpListener};
+
+    let proc_path = "/proc/sys/net/ipv4/ip_local_port_range";
+    let content = std::fs::read_to_string(proc_path)
+        .unwrap_or_else(|e| panic!("failed to read ephemeral port range from {proc_path}: {e}"));
+
+    let mut parts = content.split_whitespace();
+    let low: u32 = parts
+        .next()
+        .unwrap_or_else(|| panic!("missing low port in {proc_path}"))
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid low port integer in {proc_path}: {e}"));
+    let high: u32 = parts
+        .next()
+        .unwrap_or_else(|| panic!("missing high port in {proc_path}"))
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid high port integer in {proc_path}: {e}"));
+
+    let candidates = (1024..low).chain((high + 1)..=65535);
+    let mut searched_any = false;
+
+    for port_u32 in candidates {
+        searched_any = true;
+        let port = port_u32 as u16;
+        if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+            drop(listener);
+            return port;
+        }
+    }
+
+    if !searched_any {
+        panic!("no non-ephemeral port candidates available outside range {low}..={high} (must be >= 1024)");
+    }
+
+    panic!("all candidate ports outside ephemeral range {low}..={high} are currently in use");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,12 +301,7 @@ mod tests {
 
     #[test]
     fn observe_reports_closed_when_nothing_is_listening() {
-        // Bind to learn a free ephemeral port, then drop the listener
-        // immediately so the port is closed again before we probe it.
-        let port = {
-            let listener = TcpListener::bind((localhost(), 0)).expect("bind an ephemeral port");
-            listener.local_addr().unwrap().port()
-        };
+        let port = closed_non_ephemeral_port();
 
         let observation = observe(localhost(), port);
 

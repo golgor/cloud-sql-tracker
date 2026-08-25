@@ -234,7 +234,6 @@ fn port_conflict_detail(connection: &Connection, observation: &PortObservation) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, TcpListener};
 
     fn connection(id: &str, port: u16) -> Connection {
         Connection {
@@ -349,16 +348,7 @@ mod tests {
 
     #[test]
     fn ports_check_is_pass_when_the_only_configured_port_is_closed() {
-        // Bind to learn a free ephemeral port, then drop the listener
-        // immediately so `port::observe` reports it Closed — this never
-        // reaches `our_unit_main_pid`'s D-Bus call (`port_conflict` only
-        // calls it once the probe is Open), so it stays safe without a
-        // live systemd session (same pattern as `port.rs`'s own tests).
-        let closed_port = {
-            let listener =
-                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind an ephemeral port");
-            listener.local_addr().unwrap().port()
-        };
+        let closed_port = crate::port::closed_non_ephemeral_port();
 
         let row = ports_check(Some(&config(vec![connection("fe-dev", closed_port)])));
 
