@@ -348,7 +348,9 @@ mod tests {
 
     #[test]
     fn ports_check_is_pass_when_the_only_configured_port_is_closed() {
-        let closed_port = crate::port::closed_non_ephemeral_port();
+        // The port stays Closed so `our_unit_main_pid` never runs, keeping this test
+        // safe without a live systemd session.
+        let closed_port = port::closed_non_ephemeral_port();
 
         let row = ports_check(Some(&config(vec![connection("fe-dev", closed_port)])));
 

@@ -163,6 +163,8 @@ fn unique<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
 ///
 /// Reads `/proc/sys/net/ipv4/ip_local_port_range` at test time to find a free port
 /// at or above 1024 that is outside the ephemeral range.
+/// Prefers ports above the ephemeral range over ports below it to avoid common local developer services.
+/// Candidate calculation uses `u32` range bounds to prevent `u16` overflow when `high` is 65535.
 /// Because the kernel auto-assigns ephemeral ports (`bind(0)`) only from within
 /// that range, ports chosen outside it will not be auto-allocated to other processes
 /// while the test runs.
@@ -191,20 +193,20 @@ pub(crate) fn closed_non_ephemeral_port() -> u16 {
         .parse()
         .unwrap_or_else(|e| panic!("invalid high port integer in {proc_path}: {e}"));
 
-    let candidates = (1024..low).chain((high + 1)..=65535);
-    let mut searched_any = false;
+    let above_start = high.saturating_add(1).max(1024);
+    let above = above_start..=65535;
+    let below = 1024..low;
 
-    for port_u32 in candidates {
-        searched_any = true;
-        let port = port_u32 as u16;
+    if above.is_empty() && below.is_empty() {
+        panic!("no non-ephemeral port candidates available outside range {low}..={high} (must be >= 1024)");
+    }
+
+    for port_u32 in above.chain(below) {
+        let port = u16::try_from(port_u32).expect("candidate port is in range 1024..=65535");
         if let Ok(listener) = TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
             drop(listener);
             return port;
         }
-    }
-
-    if !searched_any {
-        panic!("no non-ephemeral port candidates available outside range {low}..={high} (must be >= 1024)");
     }
 
     panic!("all candidate ports outside ephemeral range {low}..={high} are currently in use");
