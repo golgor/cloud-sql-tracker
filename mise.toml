@@ -5,6 +5,7 @@
 rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
 hk = "1.56.0" # same as hk.pkl amends / min_hk_version
 "pipx:check-jsonschema" = "0.38.0" # same as CI pip install
+"cargo:cargo-audit" = "0.21.1"
 
 [env]
 HK_MISE = "1"
@@ -31,6 +32,10 @@ run = "cargo test"
 [tasks.contracts]
 description = "Layer 1: goldens vs JSON Schemas"
 run = "scripts/validate-contracts.sh"
+
+[tasks.audit]
+description = "Audit dependencies for known vulnerabilities"
+run = "cargo audit"
 
 [tasks.check]
 description = "Full local gate (matches CI)"
