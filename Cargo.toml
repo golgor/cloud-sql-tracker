@@ -12,7 +12,6 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
-procfs = { version = "0.18", default-features = false }
 # `time`: `clock_gettime(ClockId::Monotonic)` for `commands::status`'s
 # Unit-start-age math (`docs/research/supervisor-io.md`, "Use monotonic
 # start time for Reconcile"). Already a transitive dependency of
@@ -24,6 +23,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 zbus = "5.19.0"
+
+# `docs/research/macos-feasibility.md`: procfs (`/proc`) only exists on Linux.
+# `port`'s Linux listener attribution needs it; the macOS stub does not.
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 # Layer 2 schema-shape proof only (docs/research/json-schema-crate.md);
