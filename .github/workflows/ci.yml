@@ -23,6 +23,7 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
+          targets: aarch64-apple-darwin
 
       - uses: actions/cache@v4
         with:
@@ -40,6 +41,11 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      # Compile gate only (issue #100): proves the crate still builds for a
+      # macOS collaborator. `check` does not link, so this needs no Apple SDK.
+      - name: Darwin compile gate
+        run: cargo check --target aarch64-apple-darwin --all-targets
 
       - uses: actions/setup-python@v5
         with:
