@@ -51,7 +51,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Same version as mise.toml pipx:check-jsonschema.
+      # Same version as mise.toml pypi:check-jsonschema.
       - name: Install check-jsonschema
         run: pip install check-jsonschema==0.38.0
 

@@ -4,7 +4,7 @@
 [tools]
 rust = { version = "1.97.1", components = ["rustfmt", "clippy"] }
 hk = "1"
-"pipx:check-jsonschema" = "0.38.0"
+"pypi:check-jsonschema" = "0.38.0"
 "cargo:cargo-audit" = "0.22.2"
 
 [env]
